@@ -10,6 +10,7 @@ RUN dnf install -y \
     python3 \
     python3-pip \
     jq \
+    findutils \
     && dnf clean all
 
 # Install OpenStack CLI
@@ -18,11 +19,15 @@ RUN pip3 install --no-cache-dir python-openstackclient
 # Create app directory
 WORKDIR /app
 
-# Copy the backup script
-COPY openstack-backup.sh /app/openstack-backup.sh
+# Copy shared library first (changes less often, better layer caching)
+COPY lib/common.sh /app/lib/common.sh
 
-# Make script executable
-RUN chmod +x /app/openstack-backup.sh
+# Copy scripts
+COPY openstack-backup.sh /app/openstack-backup.sh
+COPY verify-backups.sh /app/verify-backups.sh
+
+# Make scripts executable
+RUN chmod +x /app/openstack-backup.sh /app/verify-backups.sh
 
 # Set entrypoint
 ENTRYPOINT ["/app/openstack-backup.sh"]
