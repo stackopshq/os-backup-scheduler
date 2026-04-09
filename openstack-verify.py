@@ -380,6 +380,17 @@ def main():
     except openstack.exceptions.EndpointNotFound:
         all_backups = None
 
+    # Count tagged resources to know if backups are expected
+    tagged_instances = [
+        s for s in conn.compute.servers(details=True)
+        if (s.metadata or {}).get('autoBackup') == 'true' and s.image
+    ]
+    tagged_volumes = [
+        v for v in (all_volumes or [])
+        if (v.metadata or {}).get('autoBackup') == 'true'
+    ]
+    has_tagged_resources = bool(tagged_instances or tagged_volumes)
+
     img  = check_instance_backups(all_images, today)
     vol  = check_volume_backups(all_backups, today)
     stuck_source = check_source_volumes(all_volumes)
@@ -428,9 +439,9 @@ def main():
         summary(msg)
         print(f"Finished with {total_stuck} stuck resource(s)!")
         sys.exit(1)
-    elif total_success == 0:
-        summary("⚠️ **Warning** · No backups found for today")
-        print("Warning: No backups found for today!")
+    elif total_success == 0 and has_tagged_resources:
+        summary("⚠️ **Warning** · No backups found for today despite tagged resources")
+        print("Warning: No backups found for today despite tagged resources!")
         sys.exit(1)
     else:
         summary(f"✅ **Success** · {total_success} backup(s) verified · {temp['volumes'] + temp['snapshots']} temp resource(s) cleaned")
