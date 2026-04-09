@@ -14,6 +14,7 @@ License: Apache-2.0
 import datetime
 import os
 import sys
+import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -33,6 +34,8 @@ BACKUP_TIMEOUT      = int(os.environ.get('BACKUP_TIMEOUT', 86400))    # actual b
 BACKUP_CONCURRENCY  = int(os.environ.get('BACKUP_CONCURRENCY', 5))
 REGION_NAME         = os.environ.get('OS_REGION_NAME', 'unknown')
 SUMMARY_FILE        = os.environ.get('GITHUB_STEP_SUMMARY', '/dev/null')
+ZABBIX_SERVER       = os.environ.get('ZABBIX_SERVER', '')
+ZABBIX_HOST         = os.environ.get('ZABBIX_HOST', '')
 
 
 ############################################################################
@@ -483,10 +486,35 @@ def write_summary(date_str: str):
 
 
 ############################################################################
+#  Zabbix reporting
+############################################################################
+
+def send_zabbix_metrics(duration: int):
+    if not ZABBIX_SERVER or not ZABBIX_HOST:
+        return
+
+    host = f"{ZABBIX_HOST}-{REGION_NAME}"
+    try:
+        from zabbix_utils import ZabbixSender, ItemValue
+        sender = ZabbixSender(server=ZABBIX_SERVER)
+        sender.send([
+            ItemValue(host, 'backup.instances.ok',  stats.instances_backed_up),
+            ItemValue(host, 'backup.volumes.ok',    stats.volumes_backed_up),
+            ItemValue(host, 'backup.errors',        stats.errors),
+            ItemValue(host, 'backup.duration',      duration),
+            ItemValue(host, 'backup.heartbeat',     int(time.time())),
+        ])
+        print(f"Zabbix metrics sent to {ZABBIX_SERVER} for host {host}")
+    except Exception as e:
+        print(f"Warning: Failed to send Zabbix metrics: {e}")
+
+
+############################################################################
 #  Entry point
 ############################################################################
 
 def main():
+    start_time = time.monotonic()
     now = datetime.datetime.now(datetime.timezone.utc)
     expire_time = now - datetime.timedelta(days=RETENTION_DAYS)
 
@@ -497,6 +525,8 @@ def main():
     delete_old_instance_backups(conn, expire_time)
     delete_old_volume_backups(conn, expire_time)
     write_summary(now.strftime('%Y-%m-%d'))
+
+    send_zabbix_metrics(int(time.monotonic() - start_time))
 
     if stats.errors:
         print(f"Finished with {stats.errors} error(s)!")

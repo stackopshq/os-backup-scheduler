@@ -13,6 +13,7 @@ License: Apache-2.0
 import datetime
 import os
 import sys
+import time
 
 import openstack
 import openstack.exceptions
@@ -22,9 +23,11 @@ import openstack.exceptions
 #  Configuration
 ############################################################################
 
-REGION_NAME  = os.environ.get('OS_REGION_NAME', 'unknown')
-SUMMARY_FILE = os.environ.get('GITHUB_STEP_SUMMARY', '/dev/null')
-OUTPUT_FILE  = os.environ.get('GITHUB_OUTPUT', '/dev/null')
+REGION_NAME   = os.environ.get('OS_REGION_NAME', 'unknown')
+SUMMARY_FILE  = os.environ.get('GITHUB_STEP_SUMMARY', '/dev/null')
+OUTPUT_FILE   = os.environ.get('GITHUB_OUTPUT', '/dev/null')
+ZABBIX_SERVER = os.environ.get('ZABBIX_SERVER', '')
+ZABBIX_HOST   = os.environ.get('ZABBIX_HOST', '')
 
 
 ############################################################################
@@ -323,6 +326,29 @@ def cleanup_temp_resources(conn, all_volumes: list, all_backups: list) -> dict:
 
 
 ############################################################################
+#  Zabbix reporting
+############################################################################
+
+def send_zabbix_metrics(total_success: int, total_stuck: int, total_error: int):
+    if not ZABBIX_SERVER or not ZABBIX_HOST:
+        return
+
+    host = f"{ZABBIX_HOST}-{REGION_NAME}"
+    try:
+        from zabbix_utils import ZabbixSender, ItemValue
+        sender = ZabbixSender(server=ZABBIX_SERVER)
+        sender.send([
+            ItemValue(host, 'verify.ok',        total_success),
+            ItemValue(host, 'verify.stuck',     total_stuck),
+            ItemValue(host, 'verify.errors',    total_error),
+            ItemValue(host, 'verify.heartbeat', int(time.time())),
+        ])
+        print(f"Zabbix metrics sent to {ZABBIX_SERVER} for host {host}")
+    except Exception as e:
+        print(f"Warning: Failed to send Zabbix metrics: {e}")
+
+
+############################################################################
 #  Entry point
 ############################################################################
 
@@ -377,6 +403,8 @@ def main():
     set_output('success_count', total_success)
     set_output('stuck_source_volumes', stuck_source)
     set_output('stuck_old_backups', img['stuck_old'] + vol['stuck_old'])
+
+    send_zabbix_metrics(total_success, total_stuck, total_error)
 
     summary("---", "")
 

@@ -30,6 +30,9 @@ jobs:
           OS_USERNAME: ${{ secrets.OS_USERNAME }}
           OS_PASSWORD: ${{ secrets.OS_PASSWORD }}
           OS_PROJECT_NAME: ${{ secrets.OS_PROJECT_NAME }}
+          # Zabbix monitoring (optional — skip if secrets not set)
+          ZABBIX_SERVER: ${{ secrets.ZABBIX_SERVER }}
+          ZABBIX_HOST: ${{ secrets.ZABBIX_HOST }}
         run: |
           echo "Running verification for region: ${{ matrix.region }}"
           /app/openstack-verify.py

@@ -69,6 +69,9 @@ jobs:
           BACKUP_CONCURRENCY: ${{ vars.BACKUP_CONCURRENCY || github.event.inputs.backup_concurrency || '5' }}
           RESOURCE_TIMEOUT: ${{ vars.RESOURCE_TIMEOUT || github.event.inputs.resource_timeout || '3600' }}
           BACKUP_TIMEOUT: ${{ vars.BACKUP_TIMEOUT || github.event.inputs.backup_timeout || '86400' }}
+          # Zabbix monitoring (optional — skip if secrets not set)
+          ZABBIX_SERVER: ${{ secrets.ZABBIX_SERVER }}
+          ZABBIX_HOST: ${{ secrets.ZABBIX_HOST }}
         run: |
           echo "Running backup for region: ${{ matrix.region }}"
           /app/openstack-backup.py

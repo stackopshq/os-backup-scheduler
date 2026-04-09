@@ -76,6 +76,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: Containerfile
           push: true
           tags: |
             ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
@@ -91,6 +92,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: Containerfile
           push: true
           tags: |
             ${{ env.DOCKERHUB_REPO }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
@@ -103,6 +105,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: Containerfile
           push: true
           tags: |
             quay.io/${{ env.QUAY_REPO }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
