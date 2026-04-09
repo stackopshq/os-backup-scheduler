@@ -86,13 +86,11 @@ def check_instance_backups(all_images: list, today: str) -> dict:
     print('-' * 40)
     print("Checking instance backups!")
 
-    summary("### Instance Backups (Images) - Today", "")
-
     counts = dict(active=0, stuck=0, error=0, stuck_old=0)
+    rows_today = []
+    rows_old_stuck = []
 
-    images = all_images
-
-    for image in images:
+    for image in all_images:
         name = image.name or ''
         if not name.startswith('autoBackup'):
             continue
@@ -104,45 +102,33 @@ def check_instance_backups(all_images: list, today: str) -> dict:
         if is_today:
             if status == 'active':
                 counts['active'] += 1
-                summary(f"- ✅ **{name}**: {status}")
+                rows_today.append(f"| {name} | ✅ {status} |")
             elif status in ('queued', 'saving'):
                 counts['stuck'] += 1
                 print(f"⚠️  STUCK: {name} - Status: {status}")
-                summary(f"- ⚠️ **{name}**: {status} (stuck)")
+                rows_today.append(f"| {name} | ⚠️ {status} (stuck) |")
             else:
                 counts['error'] += 1
                 print(f"❌ ERROR: {name} - Status: {status} - Created: {created_at}")
-                summary(f"- ❌ **{name}**: {status}")
+                rows_today.append(f"| {name} | ❌ {status} |")
         else:
             if status in ('queued', 'saving'):
                 counts['stuck_old'] += 1
+                print(f"🔴 OLD BACKUP: {name} - Status: {status} - Created: {created_at}")
+                rows_old_stuck.append(f"| {name} | 🔴 {status} | {created_at[:10]} |")
 
+    icon = '❌' if counts['error'] else ('⚠️' if counts['stuck'] else '✅')
     summary(
-        "",
-        f"**Summary:** ✅ Active: {counts['active']} | ⚠️ Stuck: {counts['stuck']} | ❌ Error: {counts['error']}",
+        f"### {icon} Instance Backups — {counts['active']} ✅ active · {counts['stuck']} ⚠️ stuck · {counts['error']} ❌ error",
         "",
     )
-
-    if counts['stuck_old'] > 0:
-        summary("### ⚠️ Old Instance Backups Still Processing", "")
-        print()
-        print("=========================================")
-        print("🔴 OLD INSTANCE BACKUPS STUCK")
-        print("=========================================")
-        for image in images:
-            name = image.name or ''
-            if not name.startswith('autoBackup'):
-                continue
-            created_at = getattr(image, 'created_at', '') or ''
-            if _parse_date(created_at) == today:
-                continue
-            status = image.status or ''
-            if status in ('queued', 'saving'):
-                print(f"🔴 OLD BACKUP: {name} - Status: {status} - Created: {created_at}")
-                summary(f"- 🔴 **{name}**: {status} (created: {created_at})")
-        print("=========================================")
-        print()
-        summary("")
+    if rows_today:
+        summary("| Backup | Status |", "|--------|--------|", *rows_today)
+    else:
+        summary("_No instance backups found for today._")
+    if rows_old_stuck:
+        summary("", "**🔴 Old backups still stuck:**", "", "| Backup | Status | Created |", "|--------|--------|---------|", *rows_old_stuck)
+    summary("")
 
     return counts
 
@@ -160,14 +146,16 @@ def check_volume_backups(all_backups: list, today: str) -> dict:
     counts = dict(available=0, stuck=0, error=0, stuck_old=0)
 
     if all_backups is None:
-        summary("- ℹ️ No volume backup service available in this region", "")
+        summary("### ℹ️ Volume Backups — service not available in this region", "")
         return counts
     if not all_backups:
-        summary("- ℹ️ No volume backups found in this region", "")
+        summary("### ℹ️ Volume Backups — no backups found", "")
         return counts
-    backups = all_backups
 
-    for backup in backups:
+    rows_today = []
+    rows_old_stuck = []
+
+    for backup in all_backups:
         name = backup.name or ''
         if not name.startswith('autoBackup'):
             continue
@@ -179,45 +167,33 @@ def check_volume_backups(all_backups: list, today: str) -> dict:
         if is_today:
             if status == 'available':
                 counts['available'] += 1
-                summary(f"- ✅ **{name}**: {status}")
+                rows_today.append(f"| {name} | ✅ {status} |")
             elif status in ('creating', 'backing-up'):
                 counts['stuck'] += 1
                 print(f"⚠️  STUCK: {name} - Status: {status}")
-                summary(f"- ⚠️ **{name}**: {status} (stuck)")
+                rows_today.append(f"| {name} | ⚠️ {status} (stuck) |")
             else:
                 counts['error'] += 1
                 print(f"❌ ERROR: {name} - Status: {status} - Created: {created_at}")
-                summary(f"- ❌ **{name}**: {status}")
+                rows_today.append(f"| {name} | ❌ {status} |")
         else:
             if status in ('creating', 'backing-up'):
                 counts['stuck_old'] += 1
+                print(f"🔴 OLD BACKUP: {name} - Status: {status} - Created: {created_at}")
+                rows_old_stuck.append(f"| {name} | 🔴 {status} | {created_at[:10]} |")
 
+    icon = '❌' if counts['error'] else ('⚠️' if counts['stuck'] else '✅')
     summary(
-        "",
-        f"**Summary:** ✅ Available: {counts['available']} | ⚠️ Stuck: {counts['stuck']} | ❌ Error: {counts['error']}",
+        f"### {icon} Volume Backups — {counts['available']} ✅ available · {counts['stuck']} ⚠️ stuck · {counts['error']} ❌ error",
         "",
     )
-
-    if counts['stuck_old'] > 0:
-        summary("### 🔴 Old Volume Backups Still Processing", "")
-        print()
-        print("=========================================")
-        print("🔴 OLD VOLUME BACKUPS STUCK")
-        print("=========================================")
-        for backup in backups:
-            name = backup.name or ''
-            if not name.startswith('autoBackup'):
-                continue
-            created_at = getattr(backup, 'created_at', '') or ''
-            if _parse_date(created_at) == today:
-                continue
-            status = backup.status or ''
-            if status in ('creating', 'backing-up'):
-                print(f"🔴 OLD BACKUP: {name} - Status: {status} - Created: {created_at}")
-                summary(f"- 🔴 **{name}**: {status} (created: {created_at})")
-        print("=========================================")
-        print()
-        summary("")
+    if rows_today:
+        summary("| Backup | Status |", "|--------|--------|", *rows_today)
+    else:
+        summary("_No volume backups found for today._")
+    if rows_old_stuck:
+        summary("", "**🔴 Old backups still stuck:**", "", "| Backup | Status | Created |", "|--------|--------|---------|", *rows_old_stuck)
+    summary("")
 
     return counts
 
@@ -235,28 +211,28 @@ def check_source_volumes(all_volumes: list) -> int:
     stuck = 0
 
     if all_volumes is None:
-        summary("- ℹ️ No volume service available in this region", "")
+        summary("### ℹ️ Source Volumes — service not available in this region", "")
         return 0
 
     tagged = [v for v in all_volumes if (v.metadata or {}).get('autoBackup') == 'true']
 
     if not tagged:
-        summary("- ✅ No tagged volumes found in this region", "")
+        summary("### ✅ Source Volumes — no tagged volumes found", "")
         return 0
 
+    rows = []
     for vol in tagged:
         name = vol.name or vol.id[:8]
         status = vol.status or ''
         if status in ('creating', 'backing-up', 'deleting', 'restoring-backup'):
             stuck += 1
             print(f"⚠️  STUCK SOURCE VOLUME: {name} - Status: {status}")
-            summary(f"- ⚠️ **{name}**: {status} (source volume stuck)")
+            rows.append(f"| {name} | ⚠️ {status} |")
+        else:
+            rows.append(f"| {name} | ✅ {status} |")
 
-    if stuck > 0:
-        summary("", f"**⚠️ Warning:** {stuck} source volume(s) stuck in unstable state")
-    else:
-        summary("- ✅ All source volumes are in stable state")
-    summary("")
+    icon = '⚠️' if stuck else '✅'
+    summary(f"### {icon} Source Volumes — {len(tagged)} tagged, {stuck} stuck", "", "| Volume | Status |", "|--------|--------|", *rows, "")
 
     return stuck
 
@@ -269,9 +245,8 @@ def cleanup_temp_resources(conn, all_volumes: list, all_backups: list) -> dict:
     print('-' * 40)
     print("Cleaning up temporary resources!")
 
-    summary("### 🧹 Temporary Resources Cleanup", "")
-
     counts = dict(volumes=0, snapshots=0, errors=0)
+    rows = []
 
     # Temp volumes (temp_vol_*)
     print("Checking for temporary volumes to cleanup...")
@@ -282,11 +257,9 @@ def cleanup_temp_resources(conn, all_volumes: list, all_backups: list) -> dict:
 
         status = vol.status or ''
         if status == 'available':
-            # Safety check: don't delete if a backup is still being created from this volume.
-            # If we can't list backups (service unavailable), skip deletion to be safe.
             if all_backups is None:
                 print(f"Skipping temp volume (cannot verify backup status): {name} ({vol.id})")
-                summary(f"- ⏳ Temp volume skipped (backup service unavailable): {name}")
+                rows.append(f"| {name} | 💾 Volume | ⏳ Skipped (backup service unavailable) |")
                 continue
             backup_in_progress = any(
                 b.volume_id == vol.id and b.status in ('creating', 'backing-up')
@@ -294,21 +267,20 @@ def cleanup_temp_resources(conn, all_volumes: list, all_backups: list) -> dict:
             )
             if backup_in_progress:
                 print(f"Skipping temp volume (backup still in progress): {name} ({vol.id})")
-                summary(f"- ⏳ Temp volume backup still in progress: {name}")
+                rows.append(f"| {name} | 💾 Volume | ⏳ Backup still in progress |")
                 continue
-
             print(f"Cleaning up temporary volume: {name} ({vol.id})")
             try:
                 conn.block_storage.delete_volume(vol.id, ignore_missing=True)
                 counts['volumes'] += 1
-                summary(f"- 🗑️ Deleted temp volume: {name}")
+                rows.append(f"| {name} | 💾 Volume | 🗑️ Deleted |")
             except Exception as e:
                 counts['errors'] += 1
                 print(f"Warning: Failed to delete temp volume {name}: {e}")
-                summary(f"- ❌ Failed to delete temp volume: {name}")
+                rows.append(f"| {name} | 💾 Volume | ❌ Delete failed |")
         elif status in ('in-use', 'creating'):
             print(f"Skipping temporary volume (still in use): {name} - Status: {status}")
-            summary(f"- ⏳ Temp volume still in use: {name} ({status})")
+            rows.append(f"| {name} | 💾 Volume | ⏳ {status} |")
 
     # Temp snapshots (temp_snap_*)
     print("Checking for temporary snapshots to cleanup...")
@@ -328,24 +300,25 @@ def cleanup_temp_resources(conn, all_volumes: list, all_backups: list) -> dict:
             try:
                 conn.block_storage.delete_snapshot(snap.id, ignore_missing=True)
                 counts['snapshots'] += 1
-                summary(f"- 🗑️ Deleted temp snapshot: {name}")
+                rows.append(f"| {name} | 📸 Snapshot | 🗑️ Deleted |")
             except Exception as e:
                 counts['errors'] += 1
                 print(f"Warning: Failed to delete temp snapshot {name}: {e}")
-                summary(f"- ❌ Failed to delete temp snapshot: {name}")
+                rows.append(f"| {name} | 📸 Snapshot | ❌ Delete failed |")
         elif status in ('creating', 'deleting'):
             print(f"Skipping temporary snapshot (busy): {name} - Status: {status}")
-            summary(f"- ⏳ Temp snapshot busy: {name} ({status})")
+            rows.append(f"| {name} | 📸 Snapshot | ⏳ {status} |")
 
-    if counts['volumes'] > 0 or counts['snapshots'] > 0:
-        summary(f"**Cleanup:** 🗑️ {counts['volumes']} temp volume(s), {counts['snapshots']} temp snapshot(s) deleted")
+    total_cleaned = counts['volumes'] + counts['snapshots']
+    summary(f"### 🧹 Temporary Resources Cleanup — {total_cleaned} deleted", "")
+    if rows:
+        summary("| Resource | Type | Action |", "|----------|------|--------|", *rows)
     else:
-        summary("- ✅ No temporary resources to cleanup")
-
-    if counts['errors'] > 0:
-        summary(f"**⚠️ Warning:** {counts['errors']} cleanup error(s)")
-
+        summary("_No temporary resources found._")
+    if counts['errors']:
+        summary("", f"> ⚠️ {counts['errors']} cleanup error(s)")
     summary("")
+
     return counts
 
 
@@ -356,12 +329,8 @@ def cleanup_temp_resources(conn, all_volumes: list, all_backups: list) -> dict:
 def main():
     today = datetime.date.today().isoformat()
 
-    summary(
-        f"## Backup Verification Report - Region: {REGION_NAME}",
-        "",
-        f"**Verification Time:** {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}",
-        "",
-    )
+    now_str = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')
+    summary(f"## Verification Report — {REGION_NAME} — {now_str}", "")
 
     conn = get_connection()
 
@@ -409,28 +378,28 @@ def main():
     set_output('stuck_source_volumes', stuck_source)
     set_output('stuck_old_backups', img['stuck_old'] + vol['stuck_old'])
 
-    summary("---")
+    summary("---", "")
 
     if total_error > 0:
-        summary(f"❌ **CRITICAL:** {total_error} backup(s) failed")
+        summary(f"❌ **Failed** · {total_error} backup(s) in error · {total_success} ok · {temp['volumes'] + temp['snapshots']} temp resources cleaned")
         print(f"Finished with {total_error} error(s)!")
         sys.exit(1)
     elif total_stuck > 0:
         stuck_old_total = img['stuck_old'] + vol['stuck_old']
+        msg = f"⚠️ **Stuck** · {total_stuck} resource(s) require attention"
         if stuck_old_total > 0:
-            summary(f"🔴 **CRITICAL:** {stuck_old_total} old backup(s) still stuck in processing state")
+            msg += f" · {stuck_old_total} old backup(s) still processing"
         if stuck_source > 0:
-            summary(f"⚠️ **WARNING:** {total_stuck} item(s) stuck (including {stuck_source} source volume(s)) and require attention")
-        else:
-            summary(f"⚠️ **WARNING:** {total_stuck} backup(s) are stuck and require attention")
+            msg += f" · {stuck_source} source volume(s) unstable"
+        summary(msg)
         print(f"Finished with {total_stuck} stuck resource(s)!")
         sys.exit(1)
     elif total_success == 0:
-        summary("⚠️ **WARNING:** No backups found for today")
+        summary("⚠️ **Warning** · No backups found for today")
         print("Warning: No backups found for today!")
         sys.exit(1)
     else:
-        summary(f"✅ **SUCCESS:** All {total_success} backup(s) completed successfully")
+        summary(f"✅ **Success** · {total_success} backup(s) verified · {temp['volumes'] + temp['snapshots']} temp resource(s) cleaned")
         print("Finished successfully!")
 
 

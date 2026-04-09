@@ -51,10 +51,20 @@ class Stats:
         self.temp_volumes_created     = 0
         self.temp_volumes_cleaned     = 0
         self.errors                   = 0
+        # Detailed lists for summary report
+        self.backed_instances: list = []          # (instance_name, backup_name)
+        self.backed_volumes: list   = []          # (volume_name, backup_name, method)
+        self.errored_resources: list = []         # (name, error_msg)
+        self.deleted_instance_backups_list: list = []   # image_name
+        self.deleted_volume_backups_list: list   = []   # backup_name
 
     def inc(self, field: str, amount: int = 1):
         with self._lock:
             setattr(self, field, getattr(self, field) + amount)
+
+    def append(self, field: str, value):
+        with self._lock:
+            getattr(self, field).append(value)
 
 stats = Stats()
 
@@ -157,9 +167,11 @@ def backup_instances(conn: openstack.connection.Connection):
         try:
             conn.compute.backup_server(server.id, backup_name, 'daily', RETENTION_DAYS)
             stats.inc('instances_backed_up')
+            stats.append('backed_instances', (server.name, backup_name))
         except Exception as e:
             print(f"Error: Failed to create backup for instance {server.name}: {e}")
             stats.inc('errors')
+            stats.append('errored_resources', (server.name, str(e)))
 
 
 ############################################################################
@@ -268,13 +280,22 @@ def _volume_backup_task(conn, volume) -> bool:
 
     if USE_SNAPSHOT_METHOD and volume.status == 'in-use':
         print(f"Using snapshot method for attached volume {volume_name}")
-        return _backup_via_snapshot(conn, volume, volume_name, backup_name)
+        method = 'snapshot'
+        success = _backup_via_snapshot(conn, volume, volume_name, backup_name)
     elif volume.status == 'available':
         print(f"Creating direct backup for detached volume {volume_name}")
-        return _backup_direct(conn, volume, volume_name, backup_name)
+        method = 'direct'
+        success = _backup_direct(conn, volume, volume_name, backup_name)
     else:
         print(f"Using force method for volume {volume_name} (status: {volume.status})")
-        return _backup_direct(conn, volume, volume_name, backup_name, force=True)
+        method = 'force'
+        success = _backup_direct(conn, volume, volume_name, backup_name, force=True)
+
+    if success:
+        stats.append('backed_volumes', (volume_name, backup_name, method))
+    else:
+        stats.append('errored_resources', (volume_name, f"backup failed (method: {method})"))
+    return success
 
 
 def backup_volumes(conn: openstack.connection.Connection):
@@ -331,9 +352,11 @@ def delete_old_instance_backups(conn, expire_time: datetime.datetime):
             try:
                 conn.image.delete_image(image.id, ignore_missing=True)
                 stats.inc('instance_backups_deleted')
+                stats.append('deleted_instance_backups_list', image.name)
             except Exception as e:
                 print(f"Error: Failed to delete instance backup {image.id}: {e}")
                 stats.inc('errors')
+                stats.append('errored_resources', (image.name, str(e)))
         else:
             print(f"Skipping instance backup: {image.name}")
 
@@ -360,9 +383,11 @@ def delete_old_volume_backups(conn, expire_time: datetime.datetime):
             try:
                 conn.block_storage.delete_backup(backup.id, ignore_missing=True)
                 stats.inc('volume_backups_deleted')
+                stats.append('deleted_volume_backups_list', backup.name)
             except Exception as e:
                 print(f"Error: Failed to delete volume backup {backup.id}: {e}")
                 stats.inc('errors')
+                stats.append('errored_resources', (backup.name, str(e)))
         else:
             print(f"Skipping volume backup: {backup.name}")
 
@@ -374,6 +399,7 @@ def delete_old_volume_backups(conn, expire_time: datetime.datetime):
 def write_summary(date_str: str):
     icon   = '❌' if stats.errors else '✅'
     status = 'Failed' if stats.errors else 'Success'
+    mode   = 'Sync' if WAIT_FOR_BACKUP else 'Async'
 
     print('-' * 40)
     print("SUMMARY")
@@ -383,30 +409,77 @@ def write_summary(date_str: str):
     print(f"Instance backups deleted:  {stats.instance_backups_deleted}")
     print(f"Volume backups deleted:    {stats.volume_backups_deleted}")
     if USE_SNAPSHOT_METHOD:
-        print(f"Snapshots created/cleaned: {stats.snapshots_created}/{stats.snapshots_cleaned}")
-        print(f"Temp vols created/cleaned: {stats.temp_volumes_created}/{stats.temp_volumes_cleaned}")
+        print(f"Snapshots created:         {stats.snapshots_created}")
+        print(f"Temp volumes created:      {stats.temp_volumes_created}")
     print(f"Errors:                    {stats.errors}")
     print('-' * 40)
 
-    summary(
-        f"## {icon} Backup Report - Region: {REGION_NAME}",
+    lines = [
+        f"## {icon} Backup Report — {REGION_NAME} — {date_str}",
         "",
-        "| Metric | Count |",
-        "|--------|-------|",
-        f"| 🖥️ Instances backed up | {stats.instances_backed_up} |",
-        f"| 💾 Volumes backed up | {stats.volumes_backed_up} |",
-        f"| 🗑️ Instance backups deleted | {stats.instance_backups_deleted} |",
-        f"| 🗑️ Volume backups deleted | {stats.volume_backups_deleted} |",
-        f"| 📸 Snapshots (created/cleaned) | {stats.snapshots_created}/{stats.snapshots_cleaned} |",
-        f"| 📦 Temp volumes (created/cleaned) | {stats.temp_volumes_created}/{stats.temp_volumes_cleaned} |",
-        f"| ⚠️ Errors | {stats.errors} |",
-        "",
-        f"**Status:** {status}  ",
-        f"**Date:** {date_str}  ",
-        f"**Retention:** {RETENTION_DAYS} days",
+        f"**Mode:** {'⏳ Async — temp resources will be cleaned up by the verification workflow' if not WAIT_FOR_BACKUP else '🔄 Sync — waited for each backup to complete'}",
+        f"**Retention:** {RETENTION_DAYS}",
         "",
         "---",
-    )
+        "",
+    ]
+
+    # Instance backups
+    lines.append(f"### 🖥️ Instance Backups — {stats.instances_backed_up} backed up")
+    lines.append("")
+    if stats.backed_instances:
+        lines += ["| Instance | Backup |", "|----------|--------|"]
+        for name, bname in stats.backed_instances:
+            lines.append(f"| {name} | {bname} |")
+    else:
+        lines.append("_No instance backups created._")
+    lines.append("")
+
+    # Volume backups
+    lines.append(f"### 💾 Volume Backups — {stats.volumes_backed_up} backed up")
+    lines.append("")
+    if stats.backed_volumes:
+        lines += ["| Volume | Backup | Method |", "|--------|--------|--------|"]
+        method_labels = {'snapshot': '📸 Snapshot', 'direct': '➡️ Direct', 'force': '⚡ Force'}
+        for vname, bname, method in stats.backed_volumes:
+            lines.append(f"| {vname} | {bname} | {method_labels.get(method, method)} |")
+        if not WAIT_FOR_BACKUP and stats.snapshots_created > 0:
+            lines.append("")
+            lines.append(f"> ⏳ **{stats.snapshots_created} snapshot(s)** and **{stats.temp_volumes_created} temp volume(s)** are pending cleanup by the verification workflow.")
+    else:
+        lines.append("_No volume backups created._")
+    lines.append("")
+
+    # Retention cleanup
+    total_deleted = stats.instance_backups_deleted + stats.volume_backups_deleted
+    lines.append(f"### 🗑️ Retention Cleanup — {total_deleted} deleted")
+    lines.append("")
+    if stats.deleted_instance_backups_list or stats.deleted_volume_backups_list:
+        lines += ["| Backup | Type |", "|--------|------|"]
+        for name in stats.deleted_instance_backups_list:
+            lines.append(f"| {name} | 🖥️ Instance |")
+        for name in stats.deleted_volume_backups_list:
+            lines.append(f"| {name} | 💾 Volume |")
+    else:
+        lines.append("_No backups deleted._")
+    lines.append("")
+
+    # Errors
+    if stats.errored_resources:
+        lines.append(f"### ❌ Errors — {stats.errors}")
+        lines.append("")
+        lines += ["| Resource | Error |", "|----------|-------|"]
+        for name, msg in stats.errored_resources:
+            lines.append(f"| {name} | {msg} |")
+        lines.append("")
+
+    lines += [
+        "---",
+        "",
+        f"{icon} **{status}** · {stats.instances_backed_up} instance(s) · {stats.volumes_backed_up} volume(s) · {stats.errors} error(s)",
+    ]
+
+    summary(*lines)
 
 
 ############################################################################
