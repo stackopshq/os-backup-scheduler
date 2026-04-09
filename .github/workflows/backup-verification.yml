@@ -34,6 +34,7 @@ jobs:
           ZABBIX_SERVER: ${{ secrets.ZABBIX_SERVER }}
           ZABBIX_HOST: ${{ secrets.ZABBIX_HOST }}
         run: |
+          chmod 666 "$GITHUB_STEP_SUMMARY"
           echo "Running verification for region: ${{ matrix.region }}"
           /app/openstack-verify.py
 
