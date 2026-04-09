@@ -1,17 +1,17 @@
 zabbix_export:
-  version: '7.4'
+  version: '7.0'
   template_groups:
-    - uuid: a571c0d144b14fd4a87a9d9b2aa9fcd6
+    - uuid: 7c8f25e7ce87417aa2b94e35e55e173b
       name: Templates/Applications
 
   templates:
-    - uuid: 6f3c2a1e8b4d5f7a9c0e2b4d6f8a0c2e
+    - uuid: 2c7ef27670154e25ae6a5337ba92b9d4
       template: tpl-os-backup
       name: OpenStack Automatic Backup
       description: |
         Monitors OpenStack backup jobs running via the os-backup-scheduler.
         Items are fed via Zabbix sender (trapper) at the end of each backup
-        and verification run. One host per project × region combination.
+        and verification run. One host per project x region combination.
 
         Expected host naming: {ZABBIX_HOST}-{OS_REGION_NAME}
         Example: backup-clientA-dc3-a
@@ -20,8 +20,7 @@ zabbix_export:
         - name: Templates/Applications
 
       items:
-        # ── Backup items ──────────────────────────────────────────────────
-        - uuid: 1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d
+        - uuid: e5c041b4429e422182ea50868cebc00d
           name: 'Backup: instances backed up'
           key: backup.instances.ok
           type: TRAP
@@ -34,7 +33,7 @@ zabbix_export:
             - tag: component
               value: backup
 
-        - uuid: 2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e
+        - uuid: 9b4fcf1b2b7441dea81c67107cad5221
           name: 'Backup: volumes backed up'
           key: backup.volumes.ok
           type: TRAP
@@ -47,7 +46,7 @@ zabbix_export:
             - tag: component
               value: backup
 
-        - uuid: 3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f
+        - uuid: 7a27ac9f48b548a59bdfd28e554b7b64
           name: 'Backup: errors'
           key: backup.errors
           type: TRAP
@@ -58,8 +57,17 @@ zabbix_export:
           tags:
             - tag: component
               value: backup
+          triggers:
+            - uuid: bd09000e1d2d47468e69ae3488d0413f
+              expression: 'last(/tpl-os-backup/backup.errors)>0'
+              name: 'Backup errors on {HOST.NAME}'
+              priority: AVERAGE
+              description: One or more errors occurred during the last backup run.
+              tags:
+                - tag: scope
+                  value: availability
 
-        - uuid: 4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a
+        - uuid: e7dabdcb0f2b456abd9a641b466d26f4
           name: 'Backup: duration'
           key: backup.duration
           type: TRAP
@@ -72,20 +80,30 @@ zabbix_export:
             - tag: component
               value: backup
 
-        - uuid: 5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b
+        - uuid: 6972d08035c3403a8997064865234e5b
           name: 'Backup: heartbeat'
           key: backup.heartbeat
           type: TRAP
           value_type: UNSIGNED
-          description: Unix timestamp of the last successful backup run. Used for Dead Man Switch detection.
+          description: Unix timestamp of the last backup run. Used for Dead Man Switch detection.
           history: 90d
-          trends: 0
+          trends: '0'
           tags:
             - tag: component
               value: backup
+          triggers:
+            - uuid: 04809d0869d1455e9b02b7026fbab37d
+              expression: 'nodata(/tpl-os-backup/backup.heartbeat,90000)=1'
+              name: 'Backup job not run in 25h on {HOST.NAME}'
+              priority: HIGH
+              description: |
+                No backup heartbeat received in the last 25 hours.
+                The scheduled backup job may not have run (cron issue, GitHub incident, quota exceeded).
+              tags:
+                - tag: scope
+                  value: availability
 
-        # ── Verification items ────────────────────────────────────────────
-        - uuid: 6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c
+        - uuid: eedb75e0edca4cacb1872da67535b33b
           name: 'Verify: backups OK'
           key: verify.ok
           type: TRAP
@@ -98,19 +116,28 @@ zabbix_export:
             - tag: component
               value: verification
 
-        - uuid: 7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d
+        - uuid: bf507c90b14746d6b2032bf452c895f5
           name: 'Verify: stuck backups'
           key: verify.stuck
           type: TRAP
           value_type: UNSIGNED
-          description: Number of backups still stuck in a transient state during the last verification run.
+          description: Number of backups stuck in a transient state.
           history: 90d
           trends: 365d
           tags:
             - tag: component
               value: verification
+          triggers:
+            - uuid: 3b7a85c625d943e6bb85454407edf2c3
+              expression: 'last(/tpl-os-backup/verify.stuck)>0'
+              name: 'Stuck backups detected on {HOST.NAME}'
+              priority: WARNING
+              description: One or more backups are stuck in a transient state (queued, saving, creating, backing-up).
+              tags:
+                - tag: scope
+                  value: availability
 
-        - uuid: 8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e
+        - uuid: 4aef4bc8a283488aa7b732e1842c3f92
           name: 'Verify: errors'
           key: verify.errors
           type: TRAP
@@ -121,65 +148,33 @@ zabbix_export:
           tags:
             - tag: component
               value: verification
+          triggers:
+            - uuid: 90b03b5c78614cd681065aa2cd468951
+              expression: 'last(/tpl-os-backup/verify.errors)>0'
+              name: 'Backup verification errors on {HOST.NAME}'
+              priority: AVERAGE
+              description: One or more backups are in error state according to the verification run.
+              tags:
+                - tag: scope
+                  value: availability
 
-        - uuid: 9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f
+        - uuid: f80976f415bc442ba6fb64cabb73c627
           name: 'Verify: heartbeat'
           key: verify.heartbeat
           type: TRAP
           value_type: UNSIGNED
           description: Unix timestamp of the last verification run. Used for Dead Man Switch detection.
           history: 90d
-          trends: 0
+          trends: '0'
           tags:
             - tag: component
               value: verification
-
-      triggers:
-        # ── Backup triggers ───────────────────────────────────────────────
-        - uuid: a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6
-          expression: 'last(/tpl-os-backup/backup.errors)>0'
-          name: 'Backup errors on {HOST.NAME}'
-          priority: AVERAGE
-          description: One or more errors occurred during the last backup run.
-          tags:
-            - tag: scope
-              value: availability
-
-        - uuid: b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7
-          expression: 'nodata(/tpl-os-backup/backup.heartbeat,90000)=1'
-          name: 'Backup job not run in 25h on {HOST.NAME}'
-          priority: HIGH
-          description: |
-            No backup heartbeat received in the last 25 hours.
-            The scheduled backup job may not have run (cron issue, GitHub incident, quota exceeded).
-          tags:
-            - tag: scope
-              value: availability
-
-        # ── Verification triggers ─────────────────────────────────────────
-        - uuid: c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8
-          expression: 'last(/tpl-os-backup/verify.errors)>0'
-          name: 'Backup verification errors on {HOST.NAME}'
-          priority: AVERAGE
-          description: One or more backups are in error state according to the verification run.
-          tags:
-            - tag: scope
-              value: availability
-
-        - uuid: d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9
-          expression: 'last(/tpl-os-backup/verify.stuck)>0'
-          name: 'Stuck backups detected on {HOST.NAME}'
-          priority: WARNING
-          description: One or more backups are stuck in a transient state (queued, saving, creating, backing-up).
-          tags:
-            - tag: scope
-              value: availability
-
-        - uuid: e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0
-          expression: 'nodata(/tpl-os-backup/verify.heartbeat,90000)=1'
-          name: 'Verification job not run in 25h on {HOST.NAME}'
-          priority: AVERAGE
-          description: No verification heartbeat received in the last 25 hours.
-          tags:
-            - tag: scope
-              value: availability
+          triggers:
+            - uuid: 9f56fbf2e675467d9fac932fcf8aa212
+              expression: 'nodata(/tpl-os-backup/verify.heartbeat,90000)=1'
+              name: 'Verification job not run in 25h on {HOST.NAME}'
+              priority: AVERAGE
+              description: No verification heartbeat received in the last 25 hours.
+              tags:
+                - tag: scope
+                  value: availability
