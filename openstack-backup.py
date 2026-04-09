@@ -309,9 +309,8 @@ def backup_volumes(conn: openstack.connection.Connection):
     print("Creating volume backups!")
 
     try:
-        tagged = list(conn.block_storage.volumes(
-            details=True, properties={'autoBackup': 'true'},
-        ))
+        all_volumes = list(conn.block_storage.volumes(details=True))
+        tagged = [v for v in all_volumes if (v.metadata or {}).get('autoBackup') == 'true']
     except openstack.exceptions.EndpointNotFound:
         print("Volume service not available in this region, skipping.")
         return
