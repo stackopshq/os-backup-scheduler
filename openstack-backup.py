@@ -498,8 +498,8 @@ def send_zabbix_metrics(duration: int):
 
     host = f"{ZABBIX_HOST}-{REGION_NAME}"
     try:
-        from zabbix_utils import ZabbixSender, ItemValue
-        sender = ZabbixSender(server=ZABBIX_SERVER)
+        from zabbix_utils import Sender, ItemValue
+        sender = Sender(server=ZABBIX_SERVER)
         sender.send([
             ItemValue(host, 'backup.instances.ok',  stats.instances_backed_up),
             ItemValue(host, 'backup.volumes.ok',    stats.volumes_backed_up),

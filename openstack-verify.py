@@ -341,8 +341,8 @@ def send_zabbix_metrics(total_success: int, total_stuck: int, total_error: int):
 
     host = f"{ZABBIX_HOST}-{REGION_NAME}"
     try:
-        from zabbix_utils import ZabbixSender, ItemValue
-        sender = ZabbixSender(server=ZABBIX_SERVER)
+        from zabbix_utils import Sender, ItemValue
+        sender = Sender(server=ZABBIX_SERVER)
         sender.send([
             ItemValue(host, 'verify.ok',        total_success),
             ItemValue(host, 'verify.stuck',     total_stuck),
