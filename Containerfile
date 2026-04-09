@@ -25,8 +25,5 @@ COPY openstack-verify.py /app/openstack-verify.py
 # Make scripts executable
 RUN chmod +x /app/openstack-backup.py /app/openstack-verify.py
 
-# Drop root privileges
-USER nobody
-
 # Set entrypoint
 ENTRYPOINT ["/app/openstack-backup.py"]
