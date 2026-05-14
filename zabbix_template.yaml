@@ -158,6 +158,44 @@ zabbix_export:
                 - tag: scope
                   value: availability
 
+        - uuid: abe21d508cfd4338a87fa456ef61329f
+          name: 'Verify: temp_* resource count'
+          key: verify.temp_count
+          type: TRAP
+          value_type: UNSIGNED
+          description: Number of temp_* (volumes + snapshots) still present after the verification cleanup. Persistent non-zero values indicate orphan resources consuming storage.
+          history: 90d
+          trends: 365d
+          tags:
+            - tag: component
+              value: verification
+
+        - uuid: 657b01849c1341329271658b5ec14088
+          name: 'Verify: temp_* resource size'
+          key: verify.temp_gb
+          type: TRAP
+          value_type: UNSIGNED
+          units: 'GB'
+          description: Total size of temp_* resources still present after the verification cleanup, in GB. Used to estimate the billing impact of orphan resources.
+          history: 90d
+          trends: 365d
+          tags:
+            - tag: component
+              value: verification
+          triggers:
+            - uuid: 862ed26dca134754bdc9d5f7e3c605ec
+              expression: 'min(/tpl-os-backup/verify.temp_gb,2h)>500'
+              name: 'Persistent temp_* orphans > 500 GB on {HOST.NAME}'
+              priority: WARNING
+              description: |
+                More than 500 GB of temp_* resources have persisted across at least
+                2 hours of verification runs. These are orphans the regular cleanup
+                cannot reclaim (typically stuck states or in-progress backups that
+                never completed). Use cleanup-stuck.yml after manual inspection.
+              tags:
+                - tag: scope
+                  value: capacity
+
         - uuid: f80976f415bc442ba6fb64cabb73c627
           name: 'Verify: heartbeat'
           key: verify.heartbeat

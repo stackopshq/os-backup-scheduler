@@ -326,6 +326,30 @@ def cleanup_temp_resources(conn, all_volumes: list, all_backups: list) -> dict:
         summary("_No temporary resources found._")
     if counts['errors']:
         summary("", f"> ⚠️ {counts['errors']} cleanup error(s)")
+
+    # Count temp_* resources that survived the cleanup (still consuming storage).
+    # These are typically backups still in progress, stuck states, or delete failures.
+    # Used to feed the verify.temp_count / verify.temp_gb Zabbix items.
+    remaining_count = 0
+    remaining_gb = 0
+    try:
+        for vol in conn.block_storage.volumes(details=True):
+            if (vol.name or '').startswith('temp_'):
+                remaining_count += 1
+                remaining_gb += int(vol.size or 0)
+        for snap in conn.block_storage.snapshots(details=True):
+            if (snap.name or '').startswith('temp_'):
+                remaining_count += 1
+                remaining_gb += int(snap.size or 0)
+    except Exception as e:
+        print(f"Warning: failed to count remaining temp resources: {e}")
+    counts['remaining_count'] = remaining_count
+    counts['remaining_gb'] = remaining_gb
+
+    summary(
+        f"> Remaining temp_* resources after cleanup: "
+        f"**{remaining_count}** items, **{remaining_gb} GB**"
+    )
     summary("")
 
     return counts
@@ -335,7 +359,8 @@ def cleanup_temp_resources(conn, all_volumes: list, all_backups: list) -> dict:
 #  Zabbix reporting
 ############################################################################
 
-def send_zabbix_metrics(total_success: int, total_stuck: int, total_error: int):
+def send_zabbix_metrics(total_success: int, total_stuck: int, total_error: int,
+                         temp_count: int = 0, temp_gb: int = 0):
     if not ZABBIX_SERVER or not ZABBIX_HOST:
         return
 
@@ -344,10 +369,12 @@ def send_zabbix_metrics(total_success: int, total_stuck: int, total_error: int):
         from zabbix_utils import Sender, ItemValue
         sender = Sender(server=ZABBIX_SERVER)
         sender.send([
-            ItemValue(host, 'verify.ok',        total_success),
-            ItemValue(host, 'verify.stuck',     total_stuck),
-            ItemValue(host, 'verify.errors',    total_error),
-            ItemValue(host, 'verify.heartbeat', int(time.time())),
+            ItemValue(host, 'verify.ok',         total_success),
+            ItemValue(host, 'verify.stuck',      total_stuck),
+            ItemValue(host, 'verify.errors',     total_error),
+            ItemValue(host, 'verify.temp_count', temp_count),
+            ItemValue(host, 'verify.temp_gb',    temp_gb),
+            ItemValue(host, 'verify.heartbeat',  int(time.time())),
         ])
         print(f"Zabbix metrics sent to {ZABBIX_SERVER} for host {host}")
     except Exception as e:
@@ -421,7 +448,11 @@ def main():
     set_output('stuck_source_volumes', stuck_source)
     set_output('stuck_old_backups', img['stuck_old'] + vol['stuck_old'])
 
-    send_zabbix_metrics(total_success, total_stuck, total_error)
+    send_zabbix_metrics(
+        total_success, total_stuck, total_error,
+        temp_count=temp.get('remaining_count', 0),
+        temp_gb=temp.get('remaining_gb', 0),
+    )
 
     summary("---", "")
 
