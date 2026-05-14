@@ -1,8 +1,8 @@
 FROM rockylinux/rockylinux:10-minimal
 
-LABEL maintainer="Net Architect"
+LABEL maintainer="StackOps"
 LABEL description="OpenStack Automatic Backup - Automated backup solution for OpenStack instances and volumes"
-LABEL org.opencontainers.image.source="https://github.com/net-architect-cloud/os-backup-scheduler"
+LABEL org.opencontainers.image.source="https://github.com/stackopshq/os-backup-scheduler"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 
 # Install system dependencies
