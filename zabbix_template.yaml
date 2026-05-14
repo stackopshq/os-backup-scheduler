@@ -85,7 +85,8 @@ zabbix_export:
           key: backup.heartbeat
           type: TRAP
           value_type: UNSIGNED
-          description: Unix timestamp of the last backup run. Used for Dead Man Switch detection.
+          units: unixtime
+          description: Unix timestamp of the last backup run. Used for Dead Man Switch detection. Rendered as a human-readable date in the UI via the `unixtime` unit.
           history: 90d
           trends: '0'
           tags:
@@ -201,7 +202,8 @@ zabbix_export:
           key: verify.heartbeat
           type: TRAP
           value_type: UNSIGNED
-          description: Unix timestamp of the last verification run. Used for Dead Man Switch detection.
+          units: unixtime
+          description: Unix timestamp of the last verification run. Used for Dead Man Switch detection. Rendered as a human-readable date in the UI via the `unixtime` unit.
           history: 90d
           trends: '0'
           tags:
