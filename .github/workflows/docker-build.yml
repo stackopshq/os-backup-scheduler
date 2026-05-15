@@ -36,13 +36,13 @@ jobs:
           if [[ "${{ github.event_name }}" == "push" ]]; then
             # Extract tag from ref (refs/tags/v1.0.0 -> v1.0.0)
             TAG="${GITHUB_REF#refs/tags/}"
-            echo "version=${TAG}" >> $GITHUB_OUTPUT
-            echo "tags=${TAG},latest" >> $GITHUB_OUTPUT
+            echo "version=${TAG}" >> "$GITHUB_OUTPUT"
+            echo "tags=${TAG},latest" >> "$GITHUB_OUTPUT"
           else
             # Manual trigger
             TAG="${{ github.event.inputs.tag }}"
-            echo "version=${TAG}" >> $GITHUB_OUTPUT
-            echo "tags=${TAG}" >> $GITHUB_OUTPUT
+            echo "version=${TAG}" >> "$GITHUB_OUTPUT"
+            echo "tags=${TAG}" >> "$GITHUB_OUTPUT"
           fi
 
       # GitHub Container Registry
@@ -115,10 +115,12 @@ jobs:
 
       - name: Summary
         run: |
-          echo "## Docker Image Build Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Registry | Image |" >> $GITHUB_STEP_SUMMARY
-          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| GitHub Container Registry | \`ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Docker Hub | \`${{ env.DOCKERHUB_REPO }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Quay.io | \`quay.io/${{ env.QUAY_REPO }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## Docker Image Build Summary"
+            echo ""
+            echo "| Registry | Image |"
+            echo "|----------|-------|"
+            echo "| GitHub Container Registry | \`ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}\` |"
+            echo "| Docker Hub | \`${{ env.DOCKERHUB_REPO }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}\` |"
+            echo "| Quay.io | \`quay.io/${{ env.QUAY_REPO }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
