@@ -1,0 +1,12 @@
+# Default ownership for the container source repository.
+*                              @kallioli
+
+# The Containerfile and the Python scripts are the backup logic itself —
+# any change here propagates to the fleet on the next image build.
+/Containerfile                 @kallioli
+/openstack-backup.py           @kallioli
+/openstack-verify.py           @kallioli
+
+# The Zabbix template is the source of truth for monitored items + triggers;
+# it has to be re-imported on the Zabbix server after every change.
+/zabbix_template.yaml          @kallioli
