@@ -25,30 +25,20 @@ jobs:
       - name: ruff format check
         run: ruff format --check .
 
-  smoke-import:
-    name: Smoke import the scripts
+  pytest:
+    name: Unit tests (pytest)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
-      - name: Install runtime requirements
-        run: pip install -r requirements.txt
-      - name: Import openstack-backup.py (catches syntax + missing imports)
-        run: python -c "import importlib.util; spec = importlib.util.spec_from_file_location('m', 'openstack-backup.py'); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)"
-        env:
-          OS_AUTH_URL: ''
-          OS_USERNAME: ''
-          OS_PASSWORD: ''
-          OS_PROJECT_NAME: ''
-      - name: Import openstack-verify.py
-        run: python -c "import importlib.util; spec = importlib.util.spec_from_file_location('m', 'openstack-verify.py'); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)"
-        env:
-          OS_AUTH_URL: ''
-          OS_USERNAME: ''
-          OS_PASSWORD: ''
-          OS_PROJECT_NAME: ''
+      - name: Install runtime + test deps
+        run: |
+          pip install -r requirements.txt
+          pip install pytest
+      - name: Run pytest
+        run: pytest -v
 
   workflows-lint:
     name: Lint GitHub workflows (actionlint)
