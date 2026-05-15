@@ -4,6 +4,7 @@ The two production scripts use dashes in their filename (`openstack-backup.py`,
 `openstack-verify.py`), which prevents a regular `import openstack_backup`.
 We load them via importlib so the tests can exercise their public symbols.
 """
+
 from __future__ import annotations
 
 import importlib.util

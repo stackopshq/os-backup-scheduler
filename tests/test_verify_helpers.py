@@ -1,4 +1,5 @@
 """Tests for the pure helpers in openstack-verify.py."""
+
 from __future__ import annotations
 
 

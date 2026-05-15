@@ -4,6 +4,7 @@ Volume backups run in parallel via ThreadPoolExecutor. Stats has a Lock for
 that exact reason; this regression test guards against someone "simplifying"
 the lock away in a future refactor.
 """
+
 from __future__ import annotations
 
 import concurrent.futures
