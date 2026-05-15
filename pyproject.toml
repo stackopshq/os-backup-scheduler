@@ -1,0 +1,19 @@
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+# Conservative: only the most established rule families. Easy to widen later
+# once the codebase is fully aligned (no warnings on a clean tree).
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "W",    # pycodestyle warnings
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+]
+ignore = [
+    "E501",  # line-too-long: we set line-length=120 instead of fighting print() calls
+    "B008",  # function call in default arg — common ergonomic pattern
+]
