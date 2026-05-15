@@ -381,6 +381,24 @@ def cleanup_temp_resources(conn, all_volumes: list, all_backups: list) -> dict:
 ############################################################################
 
 
+def send_zabbix_run_started():
+    """Ship a single trapper item marking that the verify run has started.
+
+    Mirror of openstack-backup.py's send_zabbix_run_started — see comment
+    there.
+    """
+    if not ZABBIX_SERVER or not ZABBIX_HOST:
+        return
+    host = f"{ZABBIX_HOST}-{REGION_NAME}"
+    try:
+        from zabbix_utils import ItemValue, Sender
+
+        Sender(server=ZABBIX_SERVER).send([ItemValue(host, "verify.run_started_at", int(time.time()))])
+        print(f"Zabbix run-started ping sent to {ZABBIX_SERVER} for host {host}")
+    except Exception as e:
+        print(f"Warning: Failed to send Zabbix run-started ping: {e}")
+
+
 def send_zabbix_metrics(total_success: int, total_stuck: int, total_error: int, temp_count: int = 0, temp_gb: int = 0):
     if not ZABBIX_SERVER or not ZABBIX_HOST:
         return
@@ -411,6 +429,12 @@ def send_zabbix_metrics(total_success: int, total_stuck: int, total_error: int, 
 
 
 def main():
+    # Emit run-started ping first thing so a crash during auth or imports
+    # still produces a recent run_started_at — paired with the missing
+    # verify.heartbeat at the end, a Zabbix trigger can detect a stuck or
+    # crashed run within ~2 h instead of the 25 h nodata floor.
+    send_zabbix_run_started()
+
     today = datetime.date.today().isoformat()
 
     now_str = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M UTC")

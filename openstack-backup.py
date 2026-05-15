@@ -130,19 +130,23 @@ def _wait(conn, resource, status="available", failures=None):
 
 
 def _wait_backup(conn, backup):
-    """Wait for a backup to become available.
+    """Wait for a Cinder backup to become available.
 
-    Uses wait_for_backup() rather than the generic wait_for_status() because
-    the block-storage proxy resolves Backup resources differently from Volume
-    and Snapshot resources internally.
+    Polls block_storage.get_backup() in a loop rather than calling
+    wait_for_backup() / wait_for_status(): the former is not consistently
+    exposed across openstacksdk versions, the latter has corner cases on
+    Backup resources. The explicit poll is dependency-agnostic.
     """
-    conn.block_storage.wait_for_backup(
-        backup.id,
-        status="available",
-        failures=["error"],
-        interval=30,
-        wait=BACKUP_TIMEOUT,
-    )
+    deadline = time.monotonic() + BACKUP_TIMEOUT
+    while time.monotonic() < deadline:
+        current = conn.block_storage.get_backup(backup.id)
+        status = current.status or ""
+        if status == "available":
+            return
+        if status == "error":
+            raise RuntimeError(f"backup {backup.id} entered error state")
+        time.sleep(30)
+    raise TimeoutError(f"backup {backup.id} did not become available within {BACKUP_TIMEOUT}s")
 
 
 ############################################################################
@@ -510,6 +514,25 @@ def write_summary(date_str: str):
 ############################################################################
 
 
+def send_zabbix_run_started():
+    """Ship a single trapper item marking that the backup run has started.
+
+    Called from main() before authenticating against OpenStack so a crash
+    during auth or imports still produces a recent run_started_at without a
+    matching heartbeat — which a Zabbix trigger can detect within ~2 h.
+    """
+    if not ZABBIX_SERVER or not ZABBIX_HOST:
+        return
+    host = f"{ZABBIX_HOST}-{REGION_NAME}"
+    try:
+        from zabbix_utils import ItemValue, Sender
+
+        Sender(server=ZABBIX_SERVER).send([ItemValue(host, "backup.run_started_at", int(time.time()))])
+        print(f"Zabbix run-started ping sent to {ZABBIX_SERVER} for host {host}")
+    except Exception as e:
+        print(f"Warning: Failed to send Zabbix run-started ping: {e}")
+
+
 def send_zabbix_metrics(duration: int):
     if not ZABBIX_SERVER or not ZABBIX_HOST:
         return
@@ -540,6 +563,12 @@ def send_zabbix_metrics(duration: int):
 
 def main():
     start_time = time.monotonic()
+    # Emit run-started ping first thing so a crash during auth or imports
+    # still produces a recent run_started_at — paired with the missing
+    # backup.heartbeat at the end, a Zabbix trigger can detect a stuck or
+    # crashed run within ~2 h instead of waiting for the 25 h nodata floor.
+    send_zabbix_run_started()
+
     now = datetime.datetime.now(datetime.UTC)
     expire_time = now - datetime.timedelta(days=RETENTION_DAYS)
 

@@ -80,6 +80,22 @@ zabbix_export:
             - tag: component
               value: backup
 
+        - uuid: 641292b2074949d4948c678bef32b887
+          name: 'Backup: run started'
+          key: backup.run_started_at
+          type: TRAP
+          value_type: UNSIGNED
+          units: unixtime
+          description: |
+            Unix timestamp emitted at the very start of the backup script, before
+            authenticating to OpenStack. Pair with backup.heartbeat to detect
+            runs that started but never finished (crash mid-flight).
+          history: 90d
+          trends: '0'
+          tags:
+            - tag: component
+              value: backup
+
         - uuid: 6972d08035c3403a8997064865234e5b
           name: 'Backup: heartbeat'
           key: backup.heartbeat
@@ -100,6 +116,18 @@ zabbix_export:
               description: |
                 No backup heartbeat received in the last 25 hours.
                 The scheduled backup job may not have run (cron issue, GitHub incident, quota exceeded).
+              tags:
+                - tag: scope
+                  value: availability
+            - uuid: 703987bb99594fb9b379098982c32126
+              expression: 'last(/tpl-os-backup/backup.heartbeat)>0 and last(/tpl-os-backup/backup.run_started_at)-last(/tpl-os-backup/backup.heartbeat)>7200'
+              name: 'Backup run started but did not finish on {HOST.NAME}'
+              priority: WARNING
+              description: |
+                The backup run started more than 2 hours ago but produced no
+                heartbeat to mark its completion. Typical causes: hang while
+                creating a snapshot, OpenStack API slow path, GitHub Actions
+                runner terminated mid-run. Check the latest workflow run.
               tags:
                 - tag: scope
                   value: availability
@@ -197,6 +225,22 @@ zabbix_export:
                 - tag: scope
                   value: capacity
 
+        - uuid: 24c12ae248e6494c817c4e04984a61bb
+          name: 'Verify: run started'
+          key: verify.run_started_at
+          type: TRAP
+          value_type: UNSIGNED
+          units: unixtime
+          description: |
+            Unix timestamp emitted at the very start of the verify script, before
+            authenticating to OpenStack. Pair with verify.heartbeat to detect
+            runs that started but never finished.
+          history: 90d
+          trends: '0'
+          tags:
+            - tag: component
+              value: verification
+
         - uuid: f80976f415bc442ba6fb64cabb73c627
           name: 'Verify: heartbeat'
           key: verify.heartbeat
@@ -215,6 +259,18 @@ zabbix_export:
               name: 'Verification job not run in 25h on {HOST.NAME}'
               priority: AVERAGE
               description: No verification heartbeat received in the last 25 hours.
+              tags:
+                - tag: scope
+                  value: availability
+            - uuid: 94f1093591ca4c35ae853df7d7939801
+              expression: 'last(/tpl-os-backup/verify.heartbeat)>0 and last(/tpl-os-backup/verify.run_started_at)-last(/tpl-os-backup/verify.heartbeat)>7200'
+              name: 'Verify run started but did not finish on {HOST.NAME}'
+              priority: WARNING
+              description: |
+                The verify run started more than 2 hours ago but produced no
+                heartbeat to mark its completion. Typical causes: hang while
+                listing volumes/backups, OpenStack API slow path, GitHub
+                Actions runner terminated mid-run.
               tags:
                 - tag: scope
                   value: availability
