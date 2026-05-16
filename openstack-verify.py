@@ -381,6 +381,30 @@ def cleanup_temp_resources(conn, all_volumes: list, all_backups: list) -> dict:
 ############################################################################
 
 
+def _make_zabbix_sender(server_spec: str):
+    """Build a `zabbix_utils.Sender` from the `ZABBIX_SERVER` env value.
+
+    A comma-separated string (e.g. ``"proxy-a.example,proxy-b.example"`` or
+    ``"10.9.0.15:10051,10.8.0.15:10051"``) is interpreted as a single
+    failover cluster: ``zabbix_utils`` tries each entry in order and falls
+    back to the next on failure. A bare host (or ``host:port``) keeps the
+    historical single-target behaviour.
+    """
+    from zabbix_utils import Sender
+
+    nodes = [p.strip() for p in server_spec.split(",") if p.strip()]
+    if len(nodes) <= 1:
+        # Single target. Split off ``:port`` if present so zabbix_utils 2.0.4
+        # does not pass the port through to ``Node(*split(':'))`` (which only
+        # takes 2 args).
+        spec = nodes[0] if nodes else server_spec
+        if ":" in spec and spec.rsplit(":", 1)[1].isdigit():
+            host, port = spec.rsplit(":", 1)
+            return Sender(server=host, port=int(port))
+        return Sender(server=spec)
+    return Sender(clusters=[nodes])
+
+
 def send_zabbix_run_started():
     """Ship a single trapper item marking that the verify run has started.
 
@@ -391,9 +415,11 @@ def send_zabbix_run_started():
         return
     host = f"{ZABBIX_HOST}-{REGION_NAME}"
     try:
-        from zabbix_utils import ItemValue, Sender
+        from zabbix_utils import ItemValue
 
-        Sender(server=ZABBIX_SERVER).send([ItemValue(host, "verify.run_started_at", int(time.time()))])
+        _make_zabbix_sender(ZABBIX_SERVER).send(
+            [ItemValue(host, "verify.run_started_at", int(time.time()))]
+        )
         print(f"Zabbix run-started ping sent to {ZABBIX_SERVER} for host {host}")
     except Exception as e:
         print(f"Warning: Failed to send Zabbix run-started ping: {e}")
@@ -405,9 +431,9 @@ def send_zabbix_metrics(total_success: int, total_stuck: int, total_error: int, 
 
     host = f"{ZABBIX_HOST}-{REGION_NAME}"
     try:
-        from zabbix_utils import ItemValue, Sender
+        from zabbix_utils import ItemValue
 
-        sender = Sender(server=ZABBIX_SERVER)
+        sender = _make_zabbix_sender(ZABBIX_SERVER)
         sender.send(
             [
                 ItemValue(host, "verify.ok", total_success),
