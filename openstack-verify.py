@@ -417,9 +417,7 @@ def send_zabbix_run_started():
     try:
         from zabbix_utils import ItemValue
 
-        _make_zabbix_sender(ZABBIX_SERVER).send(
-            [ItemValue(host, "verify.run_started_at", int(time.time()))]
-        )
+        _make_zabbix_sender(ZABBIX_SERVER).send([ItemValue(host, "verify.run_started_at", int(time.time()))])
         print(f"Zabbix run-started ping sent to {ZABBIX_SERVER} for host {host}")
     except Exception as e:
         print(f"Warning: Failed to send Zabbix run-started ping: {e}")
