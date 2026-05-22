@@ -275,6 +275,27 @@ def check_source_volumes(all_volumes: list) -> int:
 ############################################################################
 
 
+def _count_temp_resources(volumes, snapshots) -> tuple[int, int]:
+    """Return (count, total_gb) of temp_* resources that are genuine orphans.
+
+    Resources in the ``deleting`` state are excluded: ``delete_volume()`` and
+    ``delete_snapshot()`` are asynchronous, so resources deleted earlier in the
+    same verify run linger in ``deleting`` and would otherwise be miscounted as
+    survivors — inflating the verify.temp_gb / verify.temp_count Zabbix metrics
+    (os-backup-scheduler#15). ``error_deleting`` is kept: it is a real orphan.
+    """
+    count = 0
+    gb = 0
+    for res in (*volumes, *snapshots):
+        if not (res.name or "").startswith("temp_"):
+            continue
+        if (res.status or "") == "deleting":
+            continue
+        count += 1
+        gb += int(res.size or 0)
+    return count, gb
+
+
 def cleanup_temp_resources(conn, all_volumes: list, all_backups: list) -> dict:
     print("-" * 40)
     print("Cleaning up temporary resources!")
@@ -352,19 +373,16 @@ def cleanup_temp_resources(conn, all_volumes: list, all_backups: list) -> dict:
         summary("", f"> ⚠️ {counts['errors']} cleanup error(s)")
 
     # Count temp_* resources that survived the cleanup (still consuming storage).
-    # These are typically backups still in progress, stuck states, or delete failures.
-    # Used to feed the verify.temp_count / verify.temp_gb Zabbix items.
+    # These are typically backups still in progress or genuinely stuck states.
+    # Resources mid-deletion are excluded — see _count_temp_resources. Feeds the
+    # verify.temp_count / verify.temp_gb Zabbix items.
     remaining_count = 0
     remaining_gb = 0
     try:
-        for vol in conn.block_storage.volumes(details=True):
-            if (vol.name or "").startswith("temp_"):
-                remaining_count += 1
-                remaining_gb += int(vol.size or 0)
-        for snap in conn.block_storage.snapshots(details=True):
-            if (snap.name or "").startswith("temp_"):
-                remaining_count += 1
-                remaining_gb += int(snap.size or 0)
+        remaining_count, remaining_gb = _count_temp_resources(
+            conn.block_storage.volumes(details=True),
+            conn.block_storage.snapshots(details=True),
+        )
     except Exception as e:
         print(f"Warning: failed to count remaining temp resources: {e}")
     counts["remaining_count"] = remaining_count
