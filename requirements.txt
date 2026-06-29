@@ -1,5 +1,5 @@
 # Pin major+minor versions for reproducible builds.
 # Update periodically and test before releasing a new image tag.
-python-openstackclient~=10.0
-openstacksdk~=4.13
+python-openstackclient~=10.1
+openstacksdk~=4.17
 zabbix-utils~=2.0
