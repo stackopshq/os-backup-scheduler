@@ -2,8 +2,7 @@
 # Update periodically and test before releasing a new image tag.
 #
 # stackops-cloud is the shared provider library (OpenStack transport,
-# inventory and the snapshot -> temp volume -> backup sequence). Pinned to a
-# commit until it is published to a package index; see the README for the
-# build-time SSH requirement this implies.
-stackops-cloud @ git+ssh://git@git.stackops.ch/stackops/stackops-cloud.git@8823dee271133a41324b6ca3d4a316f515782137
+# inventory and the snapshot -> temp volume -> backup sequence). Public
+# repository, pinned to a commit until it is published to a package index.
+stackops-cloud @ git+https://git.stackops.ch/stackops/stackops-cloud.git@6bd4649
 zabbix-utils~=2.0

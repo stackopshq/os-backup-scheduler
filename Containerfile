@@ -7,9 +7,9 @@ LABEL org.opencontainers.image.licenses="Apache-2.0"
 
 # Rocky 10 ships Python 3.12; stackops-cloud requires 3.14. uv installs a
 # standalone 3.14 under /opt/python and builds the venv from it, so the base
-# image stays the fleet's EL10 standard. git and ssh are build-time only, for
-# the git+ssh dependency in requirements.txt.
-RUN microdnf install -y git openssh-clients ca-certificates \
+# image stays the fleet's EL10 standard. git is build-time only, for the
+# git+https dependency in requirements.txt.
+RUN microdnf install -y git ca-certificates \
     && microdnf clean all
 
 COPY --from=ghcr.io/astral-sh/uv:0.11.7 /uv /usr/local/bin/uv
@@ -19,14 +19,8 @@ ENV UV_PYTHON_INSTALL_DIR=/opt/python \
 
 RUN uv python install 3.14 && uv venv --python 3.14 /opt/venv
 
-# The private Gitea dependency needs an SSH identity at build time:
-#   podman build --ssh default -t os-backup-scheduler:dev .
-# The key never lands in a layer.
 COPY requirements.txt /tmp/requirements.txt
-RUN --mount=type=ssh \
-    mkdir -p -m 0700 /root/.ssh \
-    && ssh-keyscan -H git.stackops.ch >> /root/.ssh/known_hosts 2>/dev/null \
-    && uv pip install --python /opt/venv/bin/python --no-cache -r /tmp/requirements.txt
+RUN uv pip install --python /opt/venv/bin/python --no-cache -r /tmp/requirements.txt
 
 # Create app directory
 WORKDIR /app
