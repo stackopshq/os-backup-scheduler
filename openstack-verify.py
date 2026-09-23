@@ -4,19 +4,27 @@ OpenStack Backup Verification Script
 
 Verifies backup completion, detects stuck/failed backups, and cleans up
 temporary resources left by async backup mode. Single authenticated session
-via openstacksdk — no per-command subprocess overhead.
+through stackops-cloud.
 
-Repository: https://github.com/net-architect-cloud/os-backup-scheduler
+Repository: https://git.stackops.ch/stackops/os-backup-scheduler
 License: Apache-2.0
 """
 
+import asyncio
 import datetime
+import logging
 import os
 import sys
 import time
+from types import SimpleNamespace
 
-import openstack
-import openstack.exceptions
+from stackops_cloud.errors import CloudError
+from stackops_cloud.provider import Credentials, Resource, ResourceKind
+from stackops_cloud.providers.openstack import (
+    OpenStackBackups,
+    OpenStackInventory,
+    OpenStackSession,
+)
 
 ############################################################################
 #  Configuration
@@ -52,8 +60,12 @@ def set_output(key: str, value):
         pass
 
 
-def get_connection() -> openstack.connection.Connection:
-    required = ["OS_AUTH_URL", "OS_USERNAME", "OS_PASSWORD", "OS_PROJECT_NAME"]
+def credentials_from_env() -> Credentials:
+    app_cred = os.environ.get("OS_APPLICATION_CREDENTIAL_ID")
+    if app_cred:
+        required = ["OS_AUTH_URL", "OS_APPLICATION_CREDENTIAL_ID", "OS_APPLICATION_CREDENTIAL_SECRET"]
+    else:
+        required = ["OS_AUTH_URL", "OS_USERNAME", "OS_PASSWORD", "OS_PROJECT_NAME"]
     missing = [v for v in required if not os.environ.get(v)]
     if missing:
         print(f"Error: Missing required environment variables: {' '.join(missing)}")
@@ -61,25 +73,74 @@ def get_connection() -> openstack.connection.Connection:
         print("Optional: OS_USER_DOMAIN_NAME, OS_PROJECT_DOMAIN_NAME, OS_REGION_NAME, OS_IDENTITY_API_VERSION")
         sys.exit(1)
 
-    conn = openstack.connect(
-        auth_url=os.environ["OS_AUTH_URL"],
-        username=os.environ["OS_USERNAME"],
-        password=os.environ["OS_PASSWORD"],
-        project_name=os.environ["OS_PROJECT_NAME"],
-        user_domain_name=os.environ.get("OS_USER_DOMAIN_NAME", "Default"),
-        project_domain_name=os.environ.get("OS_PROJECT_DOMAIN_NAME", "default"),
-        identity_api_version=os.environ.get("OS_IDENTITY_API_VERSION", "3"),
-        region_name=os.environ.get("OS_REGION_NAME"),
+    secrets = {"auth_url": os.environ["OS_AUTH_URL"]}
+    if app_cred:
+        secrets["application_credential_id"] = app_cred
+        secrets["application_credential_secret"] = os.environ["OS_APPLICATION_CREDENTIAL_SECRET"]
+    else:
+        secrets.update(
+            username=os.environ["OS_USERNAME"],
+            password=os.environ["OS_PASSWORD"],
+            project_name=os.environ["OS_PROJECT_NAME"],
+            user_domain_name=os.environ.get("OS_USER_DOMAIN_NAME", "Default"),
+            project_domain_name=os.environ.get("OS_PROJECT_DOMAIN_NAME", "default"),
+        )
+    return Credentials(
+        provider_slug="openstack",
+        region_id=os.environ.get("OS_REGION_NAME") or "",
+        project_id="",
+        secrets=secrets,
     )
 
+
+class Cloud:
+    def __init__(self, session: OpenStackSession, creds: Credentials, services: tuple[str, ...]):
+        self.creds = creds
+        self.inventory = OpenStackInventory(session)
+        self.backups = OpenStackBackups(session)
+        self.services = services
+
+    @property
+    def has_block_storage(self) -> bool:
+        return "block-storage" in self.services
+
+    async def list(self, kind: ResourceKind) -> list:
+        """Resources of one kind as report views (see ``_view``); ``None``
+        when the service is absent from the region, matching the original
+        script's EndpointNotFound handling."""
+        if kind in (ResourceKind.VOLUME, ResourceKind.BACKUP, ResourceKind.SNAPSHOT) and not self.has_block_storage:
+            return None
+        return [_view(r) async for r in self.inventory.resources(self.creds, kinds=[kind])]
+
+
+def _view(resource: Resource) -> SimpleNamespace:
+    """The attribute shape the report functions were written against.
+
+    Keeping the report code verbatim is the point: it is what operators read
+    every morning, and the tests exercise it through these attributes.
+    """
+    return SimpleNamespace(
+        id=resource.id,
+        name=resource.name,
+        status=resource.raw_status,
+        created_at=resource.created_at.isoformat() if resource.created_at else "",
+        size=resource.size_gb,
+        metadata=resource.tags,
+        volume_id=resource.attributes.get("volume_id"),
+        visibility=resource.attributes.get("visibility"),
+        resource=resource,
+    )
+
+
+async def connect(session: OpenStackSession) -> Cloud:
+    creds = credentials_from_env()
     print("Verifying OpenStack connectivity...")
-    try:
-        conn.authorize()
-    except openstack.exceptions.SDKException as e:
-        print(f"Error: Failed to authenticate with OpenStack: {e}")
+    health = await OpenStackInventory(session).health(creds)
+    if not health.ok:
+        print(f"Error: Failed to authenticate with OpenStack: {health.detail}")
         sys.exit(1)
     print("Authentication successful.")
-    return conn
+    return Cloud(session, creds, health.checked)
 
 
 def _parse_date(ts: str) -> str:
@@ -129,7 +190,7 @@ def check_instance_backups(all_images: list, today: str) -> dict:
 
     icon = "❌" if counts["error"] else ("⚠️" if counts["stuck"] else "✅")
     summary(
-        f"### {icon} Instance Backups — {counts['active']} ✅ active · {counts['stuck']} ⚠️ stuck · {counts['error']} ❌ error",
+        f"### {icon} Instance Backups - {counts['active']} ✅ active · {counts['stuck']} ⚠️ stuck · {counts['error']} ❌ error",
         "",
     )
     if rows_today:
@@ -164,10 +225,10 @@ def check_volume_backups(all_backups: list, today: str) -> dict:
     counts = dict(available=0, stuck=0, error=0, stuck_old=0)
 
     if all_backups is None:
-        summary("### ℹ️ Volume Backups — service not available in this region", "")
+        summary("### ℹ️ Volume Backups - service not available in this region", "")
         return counts
     if not all_backups:
-        summary("### ℹ️ Volume Backups — no backups found", "")
+        summary("### ℹ️ Volume Backups - no backups found", "")
         return counts
 
     rows_today = []
@@ -202,7 +263,7 @@ def check_volume_backups(all_backups: list, today: str) -> dict:
 
     icon = "❌" if counts["error"] else ("⚠️" if counts["stuck"] else "✅")
     summary(
-        f"### {icon} Volume Backups — {counts['available']} ✅ available · {counts['stuck']} ⚠️ stuck · {counts['error']} ❌ error",
+        f"### {icon} Volume Backups - {counts['available']} ✅ available · {counts['stuck']} ⚠️ stuck · {counts['error']} ❌ error",
         "",
     )
     if rows_today:
@@ -237,13 +298,13 @@ def check_source_volumes(all_volumes: list) -> int:
     stuck = 0
 
     if all_volumes is None:
-        summary("### ℹ️ Source Volumes — service not available in this region", "")
+        summary("### ℹ️ Source Volumes - service not available in this region", "")
         return 0
 
     tagged = [v for v in all_volumes if (v.metadata or {}).get("autoBackup") == "true"]
 
     if not tagged:
-        summary("### ✅ Source Volumes — no tagged volumes found", "")
+        summary("### ✅ Source Volumes - no tagged volumes found", "")
         return 0
 
     rows = []
@@ -259,7 +320,7 @@ def check_source_volumes(all_volumes: list) -> int:
 
     icon = "⚠️" if stuck else "✅"
     summary(
-        f"### {icon} Source Volumes — {len(tagged)} tagged, {stuck} stuck",
+        f"### {icon} Source Volumes - {len(tagged)} tagged, {stuck} stuck",
         "",
         "| Volume | Status |",
         "|--------|--------|",
@@ -281,7 +342,7 @@ def _count_temp_resources(volumes, snapshots) -> tuple[int, int]:
     Resources in the ``deleting`` state are excluded: ``delete_volume()`` and
     ``delete_snapshot()`` are asynchronous, so resources deleted earlier in the
     same verify run linger in ``deleting`` and would otherwise be miscounted as
-    survivors — inflating the verify.temp_gb / verify.temp_count Zabbix metrics
+    survivors, inflating the verify.temp_gb / verify.temp_count Zabbix metrics
     (os-backup-scheduler#15). ``error_deleting`` is kept: it is a real orphan.
     """
     count = 0
@@ -296,7 +357,7 @@ def _count_temp_resources(volumes, snapshots) -> tuple[int, int]:
     return count, gb
 
 
-def cleanup_temp_resources(conn, all_volumes: list, all_backups: list) -> dict:
+async def cleanup_temp_resources(cloud: Cloud, all_volumes: list, all_backups: list) -> dict:
     print("-" * 40)
     print("Cleaning up temporary resources!")
 
@@ -325,7 +386,7 @@ def cleanup_temp_resources(conn, all_volumes: list, all_backups: list) -> dict:
                 continue
             print(f"Cleaning up temporary volume: {name} ({vol.id})")
             try:
-                conn.block_storage.delete_volume(vol.id, ignore_missing=True)
+                await cloud.backups.delete(cloud.creds, vol.resource)
                 counts["volumes"] += 1
                 rows.append(f"| {name} | 💾 Volume | 🗑️ Deleted |")
             except Exception as e:
@@ -338,10 +399,7 @@ def cleanup_temp_resources(conn, all_volumes: list, all_backups: list) -> dict:
 
     # Temp snapshots (temp_snap_*)
     print("Checking for temporary snapshots to cleanup...")
-    try:
-        all_snapshots = list(conn.block_storage.snapshots(details=True))
-    except openstack.exceptions.EndpointNotFound:
-        all_snapshots = None
+    all_snapshots = await cloud.list(ResourceKind.SNAPSHOT)
 
     for snap in all_snapshots or []:
         name = snap.name or ""
@@ -352,7 +410,7 @@ def cleanup_temp_resources(conn, all_volumes: list, all_backups: list) -> dict:
         if status == "available":
             print(f"Cleaning up temporary snapshot: {name} ({snap.id})")
             try:
-                conn.block_storage.delete_snapshot(snap.id, ignore_missing=True)
+                await cloud.backups.delete(cloud.creds, snap.resource)
                 counts["snapshots"] += 1
                 rows.append(f"| {name} | 📸 Snapshot | 🗑️ Deleted |")
             except Exception as e:
@@ -364,7 +422,7 @@ def cleanup_temp_resources(conn, all_volumes: list, all_backups: list) -> dict:
             rows.append(f"| {name} | 📸 Snapshot | ⏳ {status} |")
 
     total_cleaned = counts["volumes"] + counts["snapshots"]
-    summary(f"### 🧹 Temporary Resources Cleanup — {total_cleaned} deleted", "")
+    summary(f"### 🧹 Temporary Resources Cleanup - {total_cleaned} deleted", "")
     if rows:
         summary("| Resource | Type | Action |", "|----------|------|--------|", *rows)
     else:
@@ -374,14 +432,14 @@ def cleanup_temp_resources(conn, all_volumes: list, all_backups: list) -> dict:
 
     # Count temp_* resources that survived the cleanup (still consuming storage).
     # These are typically backups still in progress or genuinely stuck states.
-    # Resources mid-deletion are excluded — see _count_temp_resources. Feeds the
+    # Resources mid-deletion are excluded: see _count_temp_resources. Feeds the
     # verify.temp_count / verify.temp_gb Zabbix items.
     remaining_count = 0
     remaining_gb = 0
     try:
         remaining_count, remaining_gb = _count_temp_resources(
-            conn.block_storage.volumes(details=True),
-            conn.block_storage.snapshots(details=True),
+            await cloud.list(ResourceKind.VOLUME) or [],
+            await cloud.list(ResourceKind.SNAPSHOT) or [],
         )
     except Exception as e:
         print(f"Warning: failed to count remaining temp resources: {e}")
@@ -426,7 +484,7 @@ def _make_zabbix_sender(server_spec: str):
 def send_zabbix_run_started():
     """Ship a single trapper item marking that the verify run has started.
 
-    Mirror of openstack-backup.py's send_zabbix_run_started — see comment
+    Mirror of openstack-backup.py's send_zabbix_run_started; see the comment
     there.
     """
     if not ZABBIX_SERVER or not ZABBIX_HOST:
@@ -470,9 +528,44 @@ def send_zabbix_metrics(total_success: int, total_stuck: int, total_error: int, 
 ############################################################################
 
 
+async def run(today: str) -> dict:
+    """Everything that talks to the cloud, in the original order so the
+    summary reads the same. Returns the figures main() reports on."""
+    async with OpenStackSession() as session:
+        cloud = await connect(session)
+
+        # Fetch shared resource lists once; passed to functions to avoid duplicate API calls.
+        # None means the service endpoint is unavailable; [] means available but empty.
+        all_images = [i for i in await cloud.list(ResourceKind.IMAGE) if i.visibility == "private"]
+        all_volumes = await cloud.list(ResourceKind.VOLUME)
+        all_backups = await cloud.list(ResourceKind.BACKUP)
+
+        # Count tagged resources to know if backups are expected
+        tagged_instances = [
+            s
+            for s in await cloud.list(ResourceKind.INSTANCE)
+            if (s.metadata or {}).get("autoBackup") == "true" and not s.resource.attributes.get("boot_from_volume")
+        ]
+        tagged_volumes = [v for v in (all_volumes or []) if (v.metadata or {}).get("autoBackup") == "true"]
+        has_tagged_resources = bool(tagged_instances or tagged_volumes)
+
+        img = check_instance_backups(all_images, today)
+        vol = check_volume_backups(all_backups, today)
+        stuck_source = check_source_volumes(all_volumes)
+        temp = await cleanup_temp_resources(cloud, all_volumes, all_backups)
+
+    return {
+        "img": img,
+        "vol": vol,
+        "stuck_source": stuck_source,
+        "temp": temp,
+        "has_tagged_resources": has_tagged_resources,
+    }
+
+
 def main():
     # Emit run-started ping first thing so a crash during auth or imports
-    # still produces a recent run_started_at — paired with the missing
+    # still produces a recent run_started_at: paired with the missing
     # verify.heartbeat at the end, a Zabbix trigger can detect a stuck or
     # crashed run within ~2 h instead of the 25 h nodata floor.
     send_zabbix_run_started()
@@ -480,35 +573,21 @@ def main():
     today = datetime.date.today().isoformat()
 
     now_str = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M UTC")
-    summary(f"## Verification Report — {REGION_NAME} — {now_str}", "")
+    summary(f"## Verification Report - {REGION_NAME} - {now_str}", "")
 
-    conn = get_connection()
-
-    # Fetch shared resource lists once — passed to functions to avoid duplicate API calls.
-    # None means the service endpoint is unavailable; [] means available but empty.
-    all_images = list(conn.image.images(visibility="private"))
+    logging.basicConfig(level=logging.WARNING, stream=sys.stdout)
 
     try:
-        all_volumes = list(conn.block_storage.volumes(details=True))
-    except openstack.exceptions.EndpointNotFound:
-        all_volumes = None
+        results = asyncio.run(run(today))
+    except CloudError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
 
-    try:
-        all_backups = list(conn.block_storage.backups(details=True))
-    except openstack.exceptions.EndpointNotFound:
-        all_backups = None
-
-    # Count tagged resources to know if backups are expected
-    tagged_instances = [
-        s for s in conn.compute.servers(details=True) if (s.metadata or {}).get("autoBackup") == "true" and s.image
-    ]
-    tagged_volumes = [v for v in (all_volumes or []) if (v.metadata or {}).get("autoBackup") == "true"]
-    has_tagged_resources = bool(tagged_instances or tagged_volumes)
-
-    img = check_instance_backups(all_images, today)
-    vol = check_volume_backups(all_backups, today)
-    stuck_source = check_source_volumes(all_volumes)
-    temp = cleanup_temp_resources(conn, all_volumes, all_backups)
+    img = results["img"]
+    vol = results["vol"]
+    stuck_source = results["stuck_source"]
+    temp = results["temp"]
+    has_tagged_resources = results["has_tagged_resources"]
 
     # ---- console summary ----
     total_stuck = img["stuck"] + vol["stuck"] + stuck_source + img["stuck_old"] + vol["stuck_old"]

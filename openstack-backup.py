@@ -3,23 +3,33 @@
 OpenStack Automatic Backup Script
 
 Automated backup solution for OpenStack instances and volumes with
-configurable retention policy. Volume backups run in parallel via
-ThreadPoolExecutor — one OpenStack session, no per-command subprocess
-overhead.
+configurable retention policy. Built on stackops-cloud: the OpenStack
+inventory and the snapshot -> temporary volume -> backup sequence live in
+the shared library; this script keeps the policy (which resources, what
+names, how long) and the reporting.
 
-Repository: https://github.com/net-architect-cloud/os-backup-scheduler
+Volume backups run concurrently (BACKUP_CONCURRENCY) on one authenticated
+session.
+
+Repository: https://git.stackops.ch/stackops/os-backup-scheduler
 License: Apache-2.0
 """
 
+import asyncio
 import datetime
+import logging
 import os
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import openstack
-import openstack.exceptions
+from stackops_cloud.errors import CloudError, ResourceBusyError
+from stackops_cloud.provider import Credentials, Resource, ResourceKind
+from stackops_cloud.providers.openstack import (
+    OpenStackBackups,
+    OpenStackInventory,
+    OpenStackSession,
+)
 
 ############################################################################
 #  Configuration
@@ -88,8 +98,18 @@ def summary(*lines: str):
         pass
 
 
-def get_connection() -> openstack.connection.Connection:
-    required = ["OS_AUTH_URL", "OS_USERNAME", "OS_PASSWORD", "OS_PROJECT_NAME"]
+def credentials_from_env() -> Credentials:
+    """Build the library credential from the OS_* contract.
+
+    Password auth is the fleet's current contract. Application credentials
+    (OS_APPLICATION_CREDENTIAL_ID + _SECRET) are accepted too, since that is
+    the direction Arkeva takes: scoped, revocable, with an expiry.
+    """
+    app_cred = os.environ.get("OS_APPLICATION_CREDENTIAL_ID")
+    if app_cred:
+        required = ["OS_AUTH_URL", "OS_APPLICATION_CREDENTIAL_ID", "OS_APPLICATION_CREDENTIAL_SECRET"]
+    else:
+        required = ["OS_AUTH_URL", "OS_USERNAME", "OS_PASSWORD", "OS_PROJECT_NAME"]
     missing = [v for v in required if not os.environ.get(v)]
     if missing:
         print(f"Error: Missing required environment variables: {' '.join(missing)}")
@@ -97,56 +117,60 @@ def get_connection() -> openstack.connection.Connection:
         print("Optional: OS_USER_DOMAIN_NAME, OS_PROJECT_DOMAIN_NAME, OS_REGION_NAME, OS_IDENTITY_API_VERSION")
         sys.exit(1)
 
-    conn = openstack.connect(
-        auth_url=os.environ["OS_AUTH_URL"],
-        username=os.environ["OS_USERNAME"],
-        password=os.environ["OS_PASSWORD"],
-        project_name=os.environ["OS_PROJECT_NAME"],
-        user_domain_name=os.environ.get("OS_USER_DOMAIN_NAME", "Default"),
-        project_domain_name=os.environ.get("OS_PROJECT_DOMAIN_NAME", "default"),
-        identity_api_version=os.environ.get("OS_IDENTITY_API_VERSION", "3"),
-        region_name=os.environ.get("OS_REGION_NAME"),
+    secrets = {"auth_url": os.environ["OS_AUTH_URL"]}
+    if app_cred:
+        secrets["application_credential_id"] = app_cred
+        secrets["application_credential_secret"] = os.environ["OS_APPLICATION_CREDENTIAL_SECRET"]
+    else:
+        secrets.update(
+            username=os.environ["OS_USERNAME"],
+            password=os.environ["OS_PASSWORD"],
+            project_name=os.environ["OS_PROJECT_NAME"],
+            user_domain_name=os.environ.get("OS_USER_DOMAIN_NAME", "Default"),
+            project_domain_name=os.environ.get("OS_PROJECT_DOMAIN_NAME", "default"),
+        )
+    return Credentials(
+        provider_slug="openstack",
+        region_id=os.environ.get("OS_REGION_NAME") or "",
+        project_id="",
+        secrets=secrets,
     )
 
+
+class Cloud:
+    """One authenticated scope: inventory, backups, and which services exist."""
+
+    def __init__(self, session: OpenStackSession, creds: Credentials, services: tuple[str, ...]):
+        self.creds = creds
+        self.inventory = OpenStackInventory(session)
+        self.backups = OpenStackBackups(
+            session,
+            resource_timeout=RESOURCE_TIMEOUT,
+            backup_timeout=BACKUP_TIMEOUT,
+        )
+        self.services = services
+
+    @property
+    def has_block_storage(self) -> bool:
+        return "block-storage" in self.services
+
+    async def list(self, kind: ResourceKind) -> list[Resource]:
+        return [r async for r in self.inventory.resources(self.creds, kinds=[kind])]
+
+
+async def connect(session: OpenStackSession) -> Cloud:
+    creds = credentials_from_env()
     print("Verifying OpenStack connectivity...")
-    try:
-        conn.authorize()
-    except openstack.exceptions.SDKException as e:
-        print(f"Error: Failed to authenticate with OpenStack: {e}")
+    health = await OpenStackInventory(session).health(creds)
+    if not health.ok:
+        print(f"Error: Failed to authenticate with OpenStack: {health.detail}")
         sys.exit(1)
     print("Authentication successful.")
-    return conn
+    return Cloud(session, creds, health.checked)
 
 
-def _wait(conn, resource, status="available", failures=None):
-    """Wait for a volume or snapshot to reach a target status."""
-    conn.block_storage.wait_for_status(
-        resource,
-        status=status,
-        failures=failures or ["error", "error_deleting"],
-        interval=10,
-        wait=RESOURCE_TIMEOUT,
-    )
-
-
-def _wait_backup(conn, backup):
-    """Wait for a Cinder backup to become available.
-
-    Polls block_storage.get_backup() in a loop rather than calling
-    wait_for_backup() / wait_for_status(): the former is not consistently
-    exposed across openstacksdk versions, the latter has corner cases on
-    Backup resources. The explicit poll is dependency-agnostic.
-    """
-    deadline = time.monotonic() + BACKUP_TIMEOUT
-    while time.monotonic() < deadline:
-        current = conn.block_storage.get_backup(backup.id)
-        status = current.status or ""
-        if status == "available":
-            return
-        if status == "error":
-            raise RuntimeError(f"backup {backup.id} entered error state")
-        time.sleep(30)
-    raise TimeoutError(f"backup {backup.id} did not become available within {BACKUP_TIMEOUT}s")
+def _timestamp() -> str:
+    return datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
 
 
 ############################################################################
@@ -154,39 +178,46 @@ def _wait_backup(conn, backup):
 ############################################################################
 
 
-def backup_instances(conn: openstack.connection.Connection):
+async def backup_instances(cloud: Cloud) -> dict[str, str]:
+    """Back up tagged boot-from-image instances. Returns id -> name for all
+    servers, which the volume step uses to label unnamed volumes."""
     print("-" * 40)
     print("Creating instance backups!")
 
-    for server in conn.compute.servers(details=True):
-        if (server.metadata or {}).get("autoBackup") != "true":
+    names: dict[str, str] = {}
+    for server in await cloud.list(ResourceKind.INSTANCE):
+        names[server.id] = server.name
+        if server.tags.get("autoBackup") != "true":
             print(f"Skipping instance (no autoBackup metadata): {server.name} - {server.id}")
             continue
 
-        # BFV detection: server.image is None or {} for boot-from-volume instances;
-        # image_id alone can be unreliable across API versions.
-        if not server.image:
+        # The inventory derives this from Nova's `image` field, which is empty
+        # for boot-from-volume instances; image_id alone is unreliable.
+        if server.attributes.get("boot_from_volume"):
             print(
                 f"Skipping instance {server.name}: boot-from-volume "
                 "(backup the volume directly with autoBackup metadata)"
             )
             continue
 
-        if server.task_state not in (None, "None"):
-            print(f"Skipping instance {server.name}: busy (task_state: {server.task_state})")
+        task_state = server.attributes.get("task_state")
+        if task_state not in (None, "None"):
+            print(f"Skipping instance {server.name}: busy (task_state: {task_state})")
             continue
 
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
-        backup_name = f"autoBackup_{timestamp}_{server.name}"
+        backup_name = f"autoBackup_{_timestamp()}_{server.name}"
         print(f"Instance {server.name} is boot-from-image, creating server backup")
         try:
-            conn.compute.backup_server(server.id, backup_name, "daily", RETENTION_DAYS)
+            await cloud.backups.backup_instance(
+                cloud.creds, server, name=backup_name, rotation=RETENTION_DAYS, backup_type="daily"
+            )
             stats.inc("instances_backed_up")
             stats.append("backed_instances", (server.name, backup_name))
         except Exception as e:
             print(f"Error: Failed to create backup for instance {server.name}: {e}")
             stats.inc("errors")
             stats.append("errored_resources", (server.name, str(e)))
+    return names
 
 
 ############################################################################
@@ -194,159 +225,97 @@ def backup_instances(conn: openstack.connection.Connection):
 ############################################################################
 
 
-def _cleanup_temp(conn, temp_volume=None, temp_snapshot=None):
-    if temp_volume:
-        try:
-            conn.block_storage.delete_volume(temp_volume.id, ignore_missing=True)
-            stats.inc("temp_volumes_cleaned")
-        except Exception as e:
-            print(f"Warning: Failed to delete temp volume {temp_volume.id}: {e}")
-    if temp_snapshot:
-        try:
-            conn.block_storage.delete_snapshot(temp_snapshot.id, ignore_missing=True)
-            stats.inc("snapshots_cleaned")
-        except Exception as e:
-            print(f"Warning: Failed to delete temp snapshot {temp_snapshot.id}: {e}")
+def _volume_label(volume: Resource, server_names: dict[str, str]) -> str:
+    """The script's naming fallback: name, else <attached-instance>_vol, else id prefix."""
+    if volume.name:
+        return volume.name
+    attached = volume.attributes.get("attached_to") or []
+    if attached:
+        server_name = server_names.get(attached[0])
+        if server_name:
+            return f"{server_name}_vol"
+    return volume.id[:8]
 
 
-def _backup_via_snapshot(conn, volume, volume_name: str, backup_name: str) -> bool:
-    """Snapshot → temp volume → backup (avoids --force on attached volumes)."""
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    snapshot_name = f"temp_snap_{timestamp}_{volume_name}"
-    temp_vol_name = f"temp_vol_{timestamp}_{volume_name}"
-    temp_snapshot = None
-    temp_volume = None
+async def _volume_backup_task(cloud: Cloud, volume: Resource, server_names: dict[str, str]) -> bool:
+    """Back up one volume. Runs under the concurrency semaphore."""
+    volume_name = _volume_label(volume, server_names)
+    print(f"Processing volume: {volume_name} - {volume.id} (status: {volume.raw_status})")
 
-    try:
-        print(f"  Step 1/5: Creating snapshot of {volume_name}...")
-        temp_snapshot = conn.block_storage.create_snapshot(
-            volume_id=volume.id,
-            name=snapshot_name,
-            is_forced=True,
-        )
-        stats.inc("snapshots_created")
-
-        print("  Step 2/5: Waiting for snapshot...")
-        _wait(conn, temp_snapshot)
-
-        print("  Step 3/5: Creating temp volume from snapshot...")
-        temp_volume = conn.block_storage.create_volume(
-            name=temp_vol_name,
-            snapshot_id=temp_snapshot.id,
-        )
-        stats.inc("temp_volumes_created")
-
-        print("  Step 4/5: Waiting for temp volume...")
-        _wait(conn, temp_volume)
-
-        print("  Step 5/5: Creating backup from temp volume...")
-        backup = conn.block_storage.create_backup(
-            volume_id=temp_volume.id,
-            name=backup_name,
-        )
-        print(f"  Backup initiated: {backup.id}")
-
-        if WAIT_FOR_BACKUP:
-            _wait_backup(conn, backup)
-            _cleanup_temp(conn, temp_volume, temp_snapshot)
-        else:
-            print("  Async mode: cleanup deferred to verification workflow")
-            print(f"    Temp snapshot: {temp_snapshot.id} ({snapshot_name})")
-            print(f"    Temp volume:   {temp_volume.id} ({temp_vol_name})")
-
-        return True
-
-    except Exception as e:
-        print(f"Error: Snapshot-based backup failed for {volume_name}: {e}")
-        _cleanup_temp(conn, temp_volume, temp_snapshot)
-        return False
-
-
-def _backup_direct(conn, volume, volume_name: str, backup_name: str, force: bool = False) -> bool:
-    try:
-        backup = conn.block_storage.create_backup(
-            volume_id=volume.id,
-            name=backup_name,
-            force=force,
-        )
-        print(f"Volume backup initiated: {backup_name} ({backup.id})")
-        if WAIT_FOR_BACKUP:
-            _wait_backup(conn, backup)
-        return True
-    except Exception as e:
-        print(f"Error: Failed to backup volume {volume_name}: {e}")
-        return False
-
-
-def _volume_backup_task(conn, volume) -> bool:
-    """Back up one volume. Runs in a thread-pool worker."""
-    volume_name = volume.name
-    if not volume_name:
-        attachments = volume.attachments or []
-        if attachments:
-            try:
-                volume_name = f"{conn.compute.get_server(attachments[0]['server_id']).name}_vol"
-            except Exception:
-                volume_name = volume.id[:8]
-        else:
-            volume_name = volume.id[:8]
-
-    print(f"Processing volume: {volume_name} - {volume.id} (status: {volume.status})")
-
-    if volume.status in ("backing-up", "creating", "deleting", "restoring-backup"):
-        print(f"Error: Volume {volume_name} is in '{volume.status}' state — cannot create backup")
-        return False
-
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    backup_name = f"autoBackup_{timestamp}_{volume_name}"
-
-    if USE_SNAPSHOT_METHOD and volume.status == "in-use":
+    backup_name = f"autoBackup_{_timestamp()}_{volume_name}"
+    status = volume.raw_status
+    if USE_SNAPSHOT_METHOD and status == "in-use":
         print(f"Using snapshot method for attached volume {volume_name}")
         method = "snapshot"
-        success = _backup_via_snapshot(conn, volume, volume_name, backup_name)
-    elif volume.status == "available":
+    elif status == "available":
         print(f"Creating direct backup for detached volume {volume_name}")
         method = "direct"
-        success = _backup_direct(conn, volume, volume_name, backup_name)
     else:
-        print(f"Using force method for volume {volume_name} (status: {volume.status})")
+        print(f"Using force method for volume {volume_name} (status: {status})")
         method = "force"
-        success = _backup_direct(conn, volume, volume_name, backup_name, force=True)
 
-    if success:
-        stats.append("backed_volumes", (volume_name, backup_name, method))
-    else:
+    try:
+        result = await cloud.backups.backup_volume(
+            cloud.creds,
+            volume,
+            name=backup_name,
+            prefer_snapshot=USE_SNAPSHOT_METHOD,
+            wait=WAIT_FOR_BACKUP,
+            temp_label=volume_name,
+        )
+    except ResourceBusyError:
+        print(f"Error: Volume {volume_name} is in '{status}' state - cannot create backup")
         stats.append("errored_resources", (volume_name, f"backup failed (method: {method})"))
-    return success
+        return False
+    except Exception as e:
+        print(f"Error: Failed to backup volume {volume_name}: {e}")
+        stats.append("errored_resources", (volume_name, f"backup failed (method: {method})"))
+        return False
+
+    method = result.method.value
+    print(f"Volume backup initiated: {backup_name} ({result.backup_id})")
+    if result.method.value == "snapshot":
+        stats.inc("snapshots_created")
+        stats.inc("temp_volumes_created")
+        if WAIT_FOR_BACKUP:
+            # The library waited and removed the temporaries before returning.
+            stats.inc("temp_volumes_cleaned")
+            stats.inc("snapshots_cleaned")
+        else:
+            print("  Async mode: cleanup deferred to verification workflow")
+            print(f"    Temp snapshot: {result.temp_snapshot_id} ({result.temp_snapshot_name})")
+            print(f"    Temp volume:   {result.temp_volume_id} ({result.temp_volume_name})")
+    stats.append("backed_volumes", (volume_name, backup_name, method))
+    return True
 
 
-def backup_volumes(conn: openstack.connection.Connection):
+async def backup_volumes(cloud: Cloud, server_names: dict[str, str]):
     print("-" * 40)
     print("Creating volume backups!")
 
-    try:
-        all_volumes = list(conn.block_storage.volumes(details=True))
-        tagged = [v for v in all_volumes if (v.metadata or {}).get("autoBackup") == "true"]
-    except openstack.exceptions.EndpointNotFound:
+    if not cloud.has_block_storage:
         print("Volume service not available in this region, skipping.")
         return
 
+    all_volumes = await cloud.list(ResourceKind.VOLUME)
+    tagged = [v for v in all_volumes if v.tags.get("autoBackup") == "true"]
     if not tagged:
         print("No volumes with autoBackup=true found.")
         return
 
-    print(f"Found {len(tagged)} volume(s) — running up to {BACKUP_CONCURRENCY} in parallel.")
+    print(f"Found {len(tagged)} volume(s) - running up to {BACKUP_CONCURRENCY} in parallel.")
+    semaphore = asyncio.Semaphore(BACKUP_CONCURRENCY)
 
-    with ThreadPoolExecutor(max_workers=BACKUP_CONCURRENCY) as executor:
-        futures = {executor.submit(_volume_backup_task, conn, vol): vol for vol in tagged}
-        for future in as_completed(futures):
-            vol = futures[future]
+    async def guarded(vol: Resource) -> bool:
+        async with semaphore:
             try:
-                success = future.result()
+                return await _volume_backup_task(cloud, vol, server_names)
             except Exception as e:
                 print(f"Error: Unexpected error for volume {vol.name or vol.id[:8]}: {e}")
-                success = False
-            stats.inc("volumes_backed_up" if success else "errors")
+                return False
+
+    for success in await asyncio.gather(*(guarded(v) for v in tagged)):
+        stats.inc("volumes_backed_up" if success else "errors")
 
 
 ############################################################################
@@ -354,28 +323,21 @@ def backup_volumes(conn: openstack.connection.Connection):
 ############################################################################
 
 
-def _parse_ts(ts: str) -> datetime.datetime:
-    dt = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=datetime.UTC)
-    return dt
-
-
-def delete_old_instance_backups(conn, expire_time: datetime.datetime):
+async def delete_old_instance_backups(cloud: Cloud, expire_time: datetime.datetime):
     print("-" * 40)
     print("Deleting old instance backups!")
 
-    for image in conn.image.images(visibility="private"):
-        if not (image.name or "").startswith("autoBackup"):
+    for image in await cloud.list(ResourceKind.IMAGE):
+        if image.attributes.get("visibility") != "private":
             continue
-        try:
-            created_at = _parse_ts(image.created_at)
-        except (AttributeError, ValueError):
+        if not image.name.startswith("autoBackup"):
             continue
-        if created_at < expire_time:
+        if image.created_at is None:
+            continue
+        if image.created_at < expire_time:
             print(f"Deleting old instance backup: {image.name} ({image.id})")
             try:
-                conn.image.delete_image(image.id, ignore_missing=True)
+                await cloud.backups.delete(cloud.creds, image)
                 stats.inc("instance_backups_deleted")
                 stats.append("deleted_instance_backups_list", image.name)
             except Exception as e:
@@ -386,27 +348,23 @@ def delete_old_instance_backups(conn, expire_time: datetime.datetime):
             print(f"Skipping instance backup: {image.name}")
 
 
-def delete_old_volume_backups(conn, expire_time: datetime.datetime):
+async def delete_old_volume_backups(cloud: Cloud, expire_time: datetime.datetime):
     print("-" * 40)
     print("Deleting old volume backups!")
 
-    try:
-        backups = list(conn.block_storage.backups(details=True))
-    except openstack.exceptions.EndpointNotFound:
+    if not cloud.has_block_storage:
         print("Volume backup service not available in this region, skipping.")
         return
 
-    for backup in backups:
-        if not (backup.name or "").startswith("autoBackup"):
+    for backup in await cloud.list(ResourceKind.BACKUP):
+        if not backup.name.startswith("autoBackup"):
             continue
-        try:
-            created_at = _parse_ts(backup.created_at)
-        except (AttributeError, ValueError):
+        if backup.created_at is None:
             continue
-        if created_at < expire_time:
+        if backup.created_at < expire_time:
             print(f"Deleting old volume backup: {backup.name} ({backup.id})")
             try:
-                conn.block_storage.delete_backup(backup.id, ignore_missing=True)
+                await cloud.backups.delete(cloud.creds, backup)
                 stats.inc("volume_backups_deleted")
                 stats.append("deleted_volume_backups_list", backup.name)
             except Exception as e:
@@ -440,9 +398,9 @@ def write_summary(date_str: str):
     print("-" * 40)
 
     lines = [
-        f"## {icon} Backup Report — {REGION_NAME} — {date_str}",
+        f"## {icon} Backup Report - {REGION_NAME} - {date_str}",
         "",
-        f"**Mode:** {'⏳ Async — temp resources will be cleaned up by the verification workflow' if not WAIT_FOR_BACKUP else '🔄 Sync — waited for each backup to complete'}",
+        f"**Mode:** {'⏳ Async - temp resources will be cleaned up by the verification workflow' if not WAIT_FOR_BACKUP else '🔄 Sync - waited for each backup to complete'}",
         f"**Retention:** {RETENTION_DAYS}",
         "",
         "---",
@@ -450,7 +408,7 @@ def write_summary(date_str: str):
     ]
 
     # Instance backups
-    lines.append(f"### 🖥️ Instance Backups — {stats.instances_backed_up} backed up")
+    lines.append(f"### 🖥️ Instance Backups - {stats.instances_backed_up} backed up")
     lines.append("")
     if stats.backed_instances:
         lines += ["| Instance | Backup |", "|----------|--------|"]
@@ -461,7 +419,7 @@ def write_summary(date_str: str):
     lines.append("")
 
     # Volume backups
-    lines.append(f"### 💾 Volume Backups — {stats.volumes_backed_up} backed up")
+    lines.append(f"### 💾 Volume Backups - {stats.volumes_backed_up} backed up")
     lines.append("")
     if stats.backed_volumes:
         lines += ["| Volume | Backup | Method |", "|--------|--------|--------|"]
@@ -479,7 +437,7 @@ def write_summary(date_str: str):
 
     # Retention cleanup
     total_deleted = stats.instance_backups_deleted + stats.volume_backups_deleted
-    lines.append(f"### 🗑️ Retention Cleanup — {total_deleted} deleted")
+    lines.append(f"### 🗑️ Retention Cleanup - {total_deleted} deleted")
     lines.append("")
     if stats.deleted_instance_backups_list or stats.deleted_volume_backups_list:
         lines += ["| Backup | Type |", "|--------|------|"]
@@ -493,7 +451,7 @@ def write_summary(date_str: str):
 
     # Errors
     if stats.errored_resources:
-        lines.append(f"### ❌ Errors — {stats.errors}")
+        lines.append(f"### ❌ Errors - {stats.errors}")
         lines.append("")
         lines += ["| Resource | Error |", "|----------|-------|"]
         for name, msg in stats.errored_resources:
@@ -543,7 +501,7 @@ def send_zabbix_run_started():
 
     Called from main() before authenticating against OpenStack so a crash
     during auth or imports still produces a recent run_started_at without a
-    matching heartbeat — which a Zabbix trigger can detect within ~2 h.
+    matching heartbeat, which a Zabbix trigger can detect within ~2 h.
     """
     if not ZABBIX_SERVER or not ZABBIX_HOST:
         return
@@ -585,24 +543,38 @@ def send_zabbix_metrics(duration: int):
 ############################################################################
 
 
+async def run() -> None:
+    now = datetime.datetime.now(datetime.UTC)
+    expire_time = now - datetime.timedelta(days=RETENTION_DAYS)
+
+    async with OpenStackSession() as session:
+        cloud = await connect(session)
+        server_names = await backup_instances(cloud)
+        await backup_volumes(cloud, server_names)
+        await delete_old_instance_backups(cloud, expire_time)
+        await delete_old_volume_backups(cloud, expire_time)
+
+    write_summary(now.strftime("%Y-%m-%d"))
+
+
 def main():
     start_time = time.monotonic()
     # Emit run-started ping first thing so a crash during auth or imports
-    # still produces a recent run_started_at — paired with the missing
+    # still produces a recent run_started_at: paired with the missing
     # backup.heartbeat at the end, a Zabbix trigger can detect a stuck or
     # crashed run within ~2 h instead of waiting for the 25 h nodata floor.
     send_zabbix_run_started()
 
-    now = datetime.datetime.now(datetime.UTC)
-    expire_time = now - datetime.timedelta(days=RETENTION_DAYS)
+    # The library narrates the snapshot sequence ("Step 1/5 ...") through
+    # logging; surface it on stdout next to this script's own prints.
+    logging.basicConfig(level=logging.INFO, format="  %(message)s", stream=sys.stdout)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
-    conn = get_connection()
-
-    backup_instances(conn)
-    backup_volumes(conn)
-    delete_old_instance_backups(conn, expire_time)
-    delete_old_volume_backups(conn, expire_time)
-    write_summary(now.strftime("%Y-%m-%d"))
+    try:
+        asyncio.run(run())
+    except CloudError as e:
+        print(f"Error: {e}")
+        stats.inc("errors")
 
     send_zabbix_metrics(int(time.monotonic() - start_time))
 

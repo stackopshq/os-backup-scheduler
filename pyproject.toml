@@ -3,7 +3,10 @@ testpaths = ["tests"]
 addopts = "-ra --strict-markers --strict-config"
 
 [tool.ruff]
-target-version = "py312"
+# The runtime is Python 3.14 (stackops-cloud requires it). Not "py314": ruff
+# 0.16 does not recognise that value, accepts it silently, and then formats
+# `except (A, B):` into Python 2 syntax that no longer parses.
+target-version = "py313"
 line-length = 120
 
 [tool.ruff.lint]

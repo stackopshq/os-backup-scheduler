@@ -1,5 +1,9 @@
-# Pin major+minor versions for reproducible builds.
+# Pin exact versions for reproducible builds.
 # Update periodically and test before releasing a new image tag.
-python-openstackclient~=10.2
-openstacksdk~=4.18
+#
+# stackops-cloud is the shared provider library (OpenStack transport,
+# inventory and the snapshot -> temp volume -> backup sequence). Pinned to a
+# commit until it is published to a package index; see the README for the
+# build-time SSH requirement this implies.
+stackops-cloud @ git+ssh://git@git.stackops.ch/stackops/stackops-cloud.git@8823dee271133a41324b6ca3d4a316f515782137
 zabbix-utils~=2.0
