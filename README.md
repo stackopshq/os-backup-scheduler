@@ -47,7 +47,7 @@ Tenants then pick up the new image when they bump their caller pin to the new ce
 | v2.3.0 | Early `run_started_at` heartbeat (sent before OpenStack auth) + defensive `_wait_backup` loop. |
 | v2.2.0 | `verify.temp_count` and `verify.temp_gb` items (orphan storage tracking). `units: unixtime` on heartbeat items. |
 | v2.1.0 | `list-temp` workflow on the central side; image unchanged. |
-| **v2.0.0** | Repo + image registry moved from `net-architect-cloud` to `stackopshq`. Old image at `ghcr.io/net-architect-cloud/os-backup-scheduler` remains pullable (frozen). |
+| **v2.0.0** | Repo + image registry moved from `net-architect-cloud` to `stackopshq`. The old image at `ghcr.io/net-architect-cloud/os-backup-scheduler` was removed on 2026-10-31; use `ghcr.io/stackopshq/os-backup-scheduler`. |
 
 ## Environment variables
 
